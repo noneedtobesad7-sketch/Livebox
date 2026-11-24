@@ -1,0 +1,84 @@
+name: Unsigned Build (Artifact)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          swift --version
+          xcodebuild -list -project LBox.xcodeproj
+
+      - name: Resolve SPM dependencies
+        run: |
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project LBox.xcodeproj \
+            -scheme LBox \
+            -clonedSourcePackagesDirPath ./build/SourcePackages 2>&1 | tee resolve.log | tail -40
+
+      - name: Build Unsigned Archive
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project LBox.xcodeproj \
+            -scheme LBox \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath ./build/App.xcarchive \
+            -derivedDataPath ./build/DerivedData \
+            -clonedSourcePackagesDirPath ./build/SourcePackages \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            | tee build.log | tail -120
+
+      - name: Create IPA
+        run: |
+          set -euo pipefail
+          APP=$(ls -d ./build/App.xcarchive/Products/Applications/*.app)
+          echo "APP=$APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          APPNAME=$(basename "$APP")
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "Payload/$APPNAME/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "Payload/$APPNAME/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "Payload/$APPNAME/Info.plist"
+          echo "--- architectures ---"
+          lipo -info "Payload/$APPNAME/LBox" || true
+          echo "--- codesign (expected: not signed) ---"
+          codesign -dv "Payload/$APPNAME" 2>&1 || true
+          zip -qry LBox.ipa Payload
+          ls -lh LBox.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LBox-IPA
+          path: LBox.ipa
+          retention-days: 14
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            build.log
+            resolve.log
+          retention-days: 3
+          if-no-files-found: ignore
