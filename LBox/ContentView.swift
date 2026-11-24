@@ -17,6 +17,8 @@ struct ContentView: View {
     
     // Automatic update checking
     @AppStorage("kAutoCheckUpdates") private var autoCheckUpdates = true
+    // Language: "system" | "zh-Hans" | "en"
+    @AppStorage("kAppLanguage") private var appLanguage = "system"
     @State private var lastAutoUpdateCheck: Date = .distantPast
     
     var body: some View {
@@ -26,6 +28,7 @@ struct ContentView: View {
             
             InAppNotificationView()
         }
+        .environment(\.locale, effectiveLocale)
         .task { await performInitialSetup() }
         .onChange(of: viewModel.displayApps.count) { _ in viewModel.checkForUpdates(installedApps: downloadManager.installedApps) }
         .onChange(of: downloadManager.installedApps) { newApps in viewModel.checkForUpdates(installedApps: newApps) }
@@ -105,6 +108,15 @@ struct ContentView: View {
             } message: { pending in
                 Text("An app with the Bundle ID '\(pending.bundleID)' is already installed (\(pending.appName)). Would you like to update it (preserving data) or install it separately?")
             }
+    }
+    
+    /// Used by Text/Button lookups; "system" keeps the device language.
+    var effectiveLocale: Locale {
+        switch appLanguage {
+        case "zh-Hans": return Locale(identifier: "zh-Hans")
+        case "en": return Locale(identifier: "en")
+        default: return Locale.current
+        }
     }
     
     var mainTabView: some View {
@@ -785,6 +797,7 @@ struct SettingsView: View {
     @AppStorage("kAutoCheckUpdates") private var autoCheckUpdates = true
     @AppStorage("kIncludePrereleaseUpdates") private var includePrereleases = true
     @AppStorage("kGitHubToken") private var gitHubToken = ""
+    @AppStorage("kAppLanguage") private var appLanguage = "system"
     @ObservedObject var github = GitHubSourceCenter.shared
     @ObservedObject var provenance = GitHubProvenanceStore.shared
     @State private var showFolderImporter = false
@@ -803,6 +816,13 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Appearance") {
+                    Picker("Language", selection: $appLanguage) {
+                        Text("Follow System").tag("system")
+                        Text("简体中文").tag("zh-Hans")
+                        Text("English").tag("en")
+                    }
+                }
                 Section("Directories") {
                     HStack { 
                         Text("Downloads")
