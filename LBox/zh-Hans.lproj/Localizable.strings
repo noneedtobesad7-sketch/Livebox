@@ -78,6 +78,10 @@
 "Filename.ipa" = "文件名.ipa";
 "https://example.com/app.ipa" = "https://example.com/app.ipa";
 "Appearance" = "外观";
+"Theme" = "主题";
+"Light" = "浅色";
+"Dark" = "深色";
+"Based on LBox by Lolendor (MIT)" = "基于 Lolendor 的 LBox（MIT）";
 "Language" = "语言";
 "Follow System" = "跟随系统";
 "Directories" = "目录";

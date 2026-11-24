@@ -62,6 +62,7 @@ struct AppItem: Codable, Identifiable, Hashable, Sendable {
         case localizedDescription
         case screenshotURLs, screenshots
         case sourceRepoName
+        case versions
     }
     
     init(from decoder: Decoder) throws {
@@ -76,10 +77,25 @@ struct AppItem: Codable, Identifiable, Hashable, Sendable {
             bundleIdentifier = "unknown.bundle.id"
         }
         
-        version = try container.decode(String.self, forKey: .version)
-        versionDate = try container.decodeIfPresent(String.self, forKey: .versionDate)
-        size = try container.decodeIfPresent(Int64.self, forKey: .size)
-        downloadURL = try container.decode(String.self, forKey: .downloadURL)
+        // Some sources (StikDebug, a few community repos) only expose the build inside
+        // versions[] and leave the app-level version/downloadURL out entirely.
+        struct VersionEntry: Decodable {
+            let version: String?
+            let date: String?
+            let downloadURL: String?
+            let size: Int64?
+        }
+        let versionEntries = (try? container.decode([VersionEntry].self, forKey: .versions)) ?? []
+        let newest = versionEntries.first
+        
+        let directVersion: String? = ((try? container.decodeIfPresent(String.self, forKey: .version)) ?? nil)
+        let directDate: String? = ((try? container.decodeIfPresent(String.self, forKey: .versionDate)) ?? nil)
+        let directSize: Int64? = ((try? container.decodeIfPresent(Int64.self, forKey: .size)) ?? nil)
+        let directURL: String? = ((try? container.decodeIfPresent(String.self, forKey: .downloadURL)) ?? nil)
+        version = directVersion ?? newest?.version ?? "0"
+        versionDate = directDate ?? newest?.date
+        size = directSize ?? newest?.size
+        downloadURL = directURL ?? newest?.downloadURL ?? ""
         
         if let iUrl = try? container.decode(String.self, forKey: .iconURL) {
             iconURL = iUrl

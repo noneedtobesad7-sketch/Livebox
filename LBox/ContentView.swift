@@ -19,6 +19,8 @@ struct ContentView: View {
     @AppStorage("kAutoCheckUpdates") private var autoCheckUpdates = true
     // Language: "system" | "zh-Hans" | "en"
     @AppStorage("kAppLanguage") private var appLanguage = "system"
+    // Theme: "system" | "light" | "dark"
+    @AppStorage("kAppTheme") private var appTheme = "system"
     @State private var lastAutoUpdateCheck: Date = .distantPast
     
     var body: some View {
@@ -29,6 +31,7 @@ struct ContentView: View {
             InAppNotificationView()
         }
         .environment(\.locale, effectiveLocale)
+        .preferredColorScheme(preferredScheme)
         .task { await performInitialSetup() }
         .onChange(of: viewModel.displayApps.count) { _ in viewModel.checkForUpdates(installedApps: downloadManager.installedApps) }
         .onChange(of: downloadManager.installedApps) { newApps in viewModel.checkForUpdates(installedApps: newApps) }
@@ -108,6 +111,15 @@ struct ContentView: View {
             } message: { pending in
                 Text("An app with the Bundle ID '\(pending.bundleID)' is already installed (\(pending.appName)). Would you like to update it (preserving data) or install it separately?")
             }
+    }
+    
+    /// nil keeps the system appearance.
+    var preferredScheme: ColorScheme? {
+        switch appTheme {
+        case "light": return .light
+        case "dark": return .dark
+        default: return nil
+        }
     }
     
     /// Used by Text/Button lookups; "system" keeps the device language.
@@ -798,6 +810,7 @@ struct SettingsView: View {
     @AppStorage("kIncludePrereleaseUpdates") private var includePrereleases = true
     @AppStorage("kGitHubToken") private var gitHubToken = ""
     @AppStorage("kAppLanguage") private var appLanguage = "system"
+    @AppStorage("kAppTheme") private var appTheme = "system"
     @ObservedObject var github = GitHubSourceCenter.shared
     @ObservedObject var provenance = GitHubProvenanceStore.shared
     @State private var showFolderImporter = false
@@ -821,6 +834,11 @@ struct SettingsView: View {
                         Text("Follow System").tag("system")
                         Text("简体中文").tag("zh-Hans")
                         Text("English").tag("en")
+                    }
+                    Picker("Theme", selection: $appTheme) {
+                        Text("Follow System").tag("system")
+                        Text("Light").tag("light")
+                        Text("Dark").tag("dark")
                     }
                 }
                 Section("Directories") {
@@ -963,8 +981,10 @@ struct SettingsView: View {
                     Button("Import Repos (JSON)") { showImporter = true }
                 }
                 Section("About") {
-                    Text("Livebox \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")")
-                    Text("A fork of LBox by Lolendor (MIT), enhanced with GitHub release tracking, IPA archiving, batch updates and updates that keep your app data. LBox and this fork are not affiliated.")
+                    Link(destination: URL(string: "https://github.com/noneedtobesad7-sketch/Livebox")!) {
+                        Text("Livebox \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")")
+                    }
+                    Text("Based on LBox by Lolendor (MIT)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     #if DEBUG
