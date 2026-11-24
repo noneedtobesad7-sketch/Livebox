@@ -4,7 +4,7 @@
 > 本项目基于 [Lolendor/LBox](https://github.com/Lolendor/LBox) 修改增强，**MIT 许可**，与 LBox 官方无隶属关系。
 
 <p align="center">
-  <img src="./screenshots/lbox_icon.jpg" width="120" alt="Livebox">
+  <img src="./screenshots/livebox_icon.png" width="120" alt="Livebox">
 </p>
 
 ---

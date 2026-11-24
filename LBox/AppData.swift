@@ -500,6 +500,41 @@ class AppStoreViewModel: ObservableObject {
     
     // MARK: - Repo Management
     
+    /// Older builds shipped a different SideStore URL. Built-in defaults only apply to a fresh
+    /// install, so an in-place upgrade needs the stored list rewritten once.
+    private func migrateDeprecatedSources() {
+        let upgrades: [String: String] = [
+            "https://sidestore.io/apps.json": "https://community-apps.sidestore.io/sidecommunity.json"
+        ]
+        
+        func rewrite(_ list: [SavedRepo]) -> ([SavedRepo], Bool) {
+            var changed = false
+            var out: [SavedRepo] = []
+            for var repo in list {
+                if let raw = repo.url?.absoluteString, let replacement = upgrades[raw],
+                   let newURL = URL(string: replacement) {
+                    repo = SavedRepo(url: newURL, name: repo.name, isEnabled: repo.isEnabled)
+                    changed = true
+                }
+                if let kids = repo.children {
+                    let (newKids, kidsChanged) = rewrite(kids)
+                    if kidsChanged {
+                        repo.children = newKids
+                        changed = true
+                    }
+                }
+                out.append(repo)
+            }
+            return (out, changed)
+        }
+        
+        let (updated, changed) = rewrite(savedRepos)
+        guard changed else { return }
+        savedRepos = updated
+        saveRepos()
+        Task { await fetchAllRepos() }
+    }
+    
     func loadRepos() {
         let fileManager = FileManager.default
         
@@ -529,6 +564,7 @@ class AppStoreViewModel: ObservableObject {
            let decoded = try? JSONDecoder().decode([SavedRepo].self, from: data) {
             savedRepos = decoded
             sortRepos()
+            migrateDeprecatedSources()
             return
         }
         
@@ -538,6 +574,7 @@ class AppStoreViewModel: ObservableObject {
             print("Migrating repos from UserDefaults to File...")
             savedRepos = decoded
             sortRepos()
+            migrateDeprecatedSources()
             // Save to new file location
             saveRepos()
             // Clean up old storage
