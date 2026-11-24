@@ -1,3 +1,6 @@
+> **本仓库是 LBox 的个人改版（v1.3）**，基于上游 [Lolendor/LBox](https://github.com/Lolendor/LBox)（MIT）。
+> 新增：GitHub Releases 更新源绑定与更新检测（稳定版/预发行版分线）、下载后保留最新 IPA 备份、批量更新、手动绑定更新源。
+> 编译只走 `.github/workflows/unsigned_artifact.yml`（GitHub Actions，macOS runner），产物为未签名 IPA，需自行签名安装。
 <div align="center">
    <img width="217" height="217" src="./screenshots/lbox_icon.jpg" alt="Logo">
 </div>
@@ -9,23 +12,23 @@
 
 ---
 
-> **⚡ Quick Start**: To enable automatic app installation to LiveContainer, select its directory ("On My iPhone" > "LiveContainer") on your device (see **[Fix File Picker](#fix-file-picker)** if unable). Then, enable **"Auto .ipa to .app"** in LBox Settings.
+> **鈿?Quick Start**: To enable automatic app installation to LiveContainer, select its directory ("On My iPhone" > "LiveContainer") on your device (see **[Fix File Picker](#fix-file-picker)** if unable). Then, enable **"Auto .ipa to .app"** in LBox Settings.
 
-## 📥 Download
+## 馃摜 Download
 
 **[Download Latest IPA (IOS 17.6+)](https://github.com/Lolendor/LBox/releases/download/v1.2/LBox.ipa)**
 
-## 🚀 Overview
+## 馃殌 Overview
 
 **LBox** bridges the gap between finding apps and running them on iOS. Instead of manually searching for IPA files and moving them around the file system, LBox allows you to add repositories (similar to AltStore or ESign), download apps in the background, and automatically extract them into your LiveContainer storage.
 
-## 📱 Screenshots
+## 馃摫 Screenshots
 
 | Store View | App Details | Downloads | Installed Apps |
 |:---:|:---:|:---:|:---:|
 | <img src="./screenshots/store.png" width="200" alt="Store View"/> | <img src="./screenshots/app_details.png" width="200" alt="App Details"/> | <img src="./screenshots/downloads.png" width="200" alt="Downloads"/> | <img src="./screenshots/apps.png" width="200" alt="Apps"/> |
 
-## ✨ Key Features
+## 鉁?Key Features
 
 *   **Repository Management**:
     *   Add and manage unlimited public repositories (JSON format).
@@ -48,7 +51,7 @@
     *   Configure custom storage locations for Downloads and LiveContainer apps (using Security Scoped Bookmarks).
     *   Search, filter, and sort apps by name, date, or size.
 
-## 🛠 How it Works
+## 馃洜 How it Works
 
 1.  **Initial Setup**: Upon first launch, LBox will ask for the LiveContainer directory. Select the root folder of your installed LiveContainer app. This step is required for auto-installation and launching apps.
 2.  **Add a Source**: Input a URL to a compliant app repository JSON **or** add a "Folder" utilizing a list URL to batch-import repos.
@@ -58,7 +61,7 @@
     *   **Update**: If the app exists, LBox offers to update it while keeping your documents and settings intact.
 5.  **Launch**: Navigate to the "Apps" tab and tap the app to run it instantly via LiveContainer.
 
-## ⚙️ Build Instructions
+## 鈿欙笍 Build Instructions
 
 ### Prerequisites
 *   Mac with Xcode installed.
@@ -74,7 +77,7 @@
 3.  Select your Development Team in the "Signing & Capabilities" tab.
 4.  Build and run on your device.
 
-## ⚠️ Known Issues
+## 鈿狅笍 Known Issues
 
 *   **"App bundle not found! Unable to read LCAppInfo.plist" Error**:
     You may encounter this error popup immediately after installing an app and trying to launch it for the first time.
@@ -85,7 +88,7 @@
     *   **Solution**: Open LiveContainer, find **LBox** in the "My Apps" list, press and hold the icon, tap **Settings**, and enable **Fix File Picker**. Then try selecting the directory again.
     <img src="./screenshots/how_to_fix_file_picker.png" width="300" alt="Fix File Picker Settings">
 
-## 📂 File Structure
+## 馃搨 File Structure
 
 *   AppData.swift: Handles repository parsing, app models, and data persistence.
 *   DownloadManager.swift: Manages URLSession tasks, file system operations, and zip extraction.
@@ -103,6 +106,6 @@ If you find this project useful:
 
 - **TON / USDT (TON)**  `UQAyBchGEKi9NnNQ3AKMQMuO-SGEhMIAKFAbkwwrsiOPj9Gy`
 
-## 📄 License
+## 馃搫 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.

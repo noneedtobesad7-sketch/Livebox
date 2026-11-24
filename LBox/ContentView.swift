@@ -489,8 +489,10 @@ struct InstalledAppItem: View {
                     }
                 }
                 Text(app.name).font(.caption).lineLimit(2).frame(height: 35, alignment: .top)
-                // Fixed-height slot: the pill(s) below never change the cell height,
+                // Fixed-height slot: the pill below never changes the cell height,
                 // so neighbouring icons/names in the grid stay on the same line.
+                // Only one pill is shown at a time ("Update" wins) to keep the
+                // ~93pt-wide cell from overflowing on narrow iPhones.
                 HStack(spacing: 4) {
                     if newVersion != nil {
                         Button {
@@ -512,8 +514,7 @@ struct InstalledAppItem: View {
                                 .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
-                    }
-                    if sourcePending {
+                    } else if sourcePending {
                         Text("源?")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundColor(.orange)
