@@ -50,6 +50,54 @@ struct BatchUpdateTarget: Identifiable, Hashable {
     let isPrerelease: Bool
 }
 
+/// Re-attaches the LiveContainer metadata of a previous install to the freshly deployed bundle.
+///
+/// LiveContainer keeps an app's per-app data in `Data/Application/<folderName>` and records the
+/// folder name in `LCAppInfo.plist` *inside the .app folder*. A plain bundle replacement drops
+/// that plist, so the next launch makes LiveContainer believe it is a brand new app and create an
+/// empty container - which is what looked like "the update wiped my data".
+///
+/// Merging the old plist in right after the copy means the first launch already points at the
+/// existing container, so no data is lost and no "launch once, then come back" step is needed.
+func migrateLCAppInfo(from oldAppURL: URL, to newAppURL: URL) -> Bool {
+    let fm = FileManager.default
+    let oldInfoURL = oldAppURL.appendingPathComponent("LCAppInfo.plist")
+    let newInfoURL = newAppURL.appendingPathComponent("LCAppInfo.plist")
+
+    guard fm.fileExists(atPath: oldInfoURL.path),
+          let oldData = try? Data(contentsOf: oldInfoURL),
+          let oldPlist = try? PropertyListSerialization.propertyList(from: oldData, format: nil) as? [String: Any] else {
+        return false
+    }
+    // Without containers there is nothing to preserve, and copying such a plist would only stop
+    // LiveContainer from creating a fresh container on first launch.
+    guard let containers = oldPlist["LCContainers"] as? [[String: Any]], !containers.isEmpty else {
+        return false
+    }
+
+    var merged = oldPlist
+    if fm.fileExists(atPath: newInfoURL.path),
+       let newData = try? Data(contentsOf: newInfoURL),
+       let newPlist = try? PropertyListSerialization.propertyList(from: newData, format: nil) as? [String: Any] {
+        // Keep keys the new bundle knows about, but the previous install wins for anything it had.
+        merged = newPlist
+        for (key, value) in oldPlist { merged[key] = value }
+    }
+    merged["LCContainers"] = containers
+
+    guard let patched = try? PropertyListSerialization.data(fromPropertyList: merged, format: .xml, options: 0) else {
+        return false
+    }
+    do {
+        try patched.write(to: newInfoURL, options: .atomic)
+        print("MigrateLCAppInfo: attached \(containers.count) container(s) to \(newAppURL.lastPathComponent)")
+        return true
+    } catch {
+        print("MigrateLCAppInfo failed: \(error)")
+        return false
+    }
+}
+
 @MainActor
 class DownloadManager: NSObject, ObservableObject {
     @Published var activeDownloads: [URL: Double] = [:]
@@ -66,12 +114,23 @@ class DownloadManager: NSObject, ObservableObject {
     
     @Published var customDownloadFolder: URL? = nil
     @Published var customLiveContainerFolder: URL? = nil 
+    /// Where archived .ipa files are kept. nil = <downloads>/IPA_Backups
+    @Published var customBackupFolder: URL? = nil
     
     // Pending Installation (Collision)
     @Published var pendingInstallation: PendingInstallation? = nil
     
-    // Backups for Updates
+    // Backups waiting for the "launch once, then verify" flow
     @Published var pendingBackups: [AppBackup] = []
+    // Backups kept after a successful update (no prompting, rollback only)
+    @Published var retainedBackups: [AppBackup] = []
+    
+    /// Keep the previous version of an app after updating it.
+    @Published var keepAppBackups: Bool = true {
+        didSet {
+            UserDefaults.standard.set(keepAppBackups, forKey: "kKeepAppBackups")
+        }
+    }
     
     // Changed to Published for reactive UI updates
     @Published var isAutoUnzipEnabled: Bool {
@@ -113,6 +172,8 @@ class DownloadManager: NSObject, ObservableObject {
     private let kResumeDataMapKey = "kResumeDataMapKey"
     
     private let kPendingBackupsKey = "kPendingBackupsKey"
+    private let kRetainedBackupsKey = "kRetainedBackupsKey"
+    private let kCustomBackupFolderKey = "kCustomBackupFolderBookmark"
     
     // URL String -> Filename in Caches
     private var diskResumeDataPaths: [String: String] = [:]
@@ -121,6 +182,7 @@ class DownloadManager: NSObject, ObservableObject {
         self.isAutoUnzipEnabled = UserDefaults.standard.bool(forKey: "kAutoUnzipEnabled")
         self.isAutoArchivingIPAs = UserDefaults.standard.object(forKey: "kAutoArchivingIPAs") as? Bool ?? true
         super.init()
+        self.keepAppBackups = UserDefaults.standard.object(forKey: "kKeepAppBackups") as? Bool ?? true
         let config = URLSessionConfiguration.background(withIdentifier: kBackgroundSessionID)
         config.isDiscretionary = false
         config.sessionSendsLaunchEvents = true
@@ -188,7 +250,12 @@ class DownloadManager: NSObject, ObservableObject {
     
     /// Folder that keeps one copy of the newest .ipa per app.
     var ipaArchiveDirectory: URL {
-        let folder = currentDownloadFolder.appendingPathComponent("IPA_Backups")
+        let folder: URL
+        if let custom = customBackupFolder {
+            folder = custom.appendingPathComponent("IPA_Backups")
+        } else {
+            folder = currentDownloadFolder.appendingPathComponent("IPA_Backups")
+        }
         if !FileManager.default.fileExists(atPath: folder.path) {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         }
@@ -371,11 +438,107 @@ class DownloadManager: NSObject, ObservableObject {
            let list = try? JSONDecoder().decode([AppBackup].self, from: data) {
             self.pendingBackups = list
         }
+        if let data = UserDefaults.standard.data(forKey: kRetainedBackupsKey),
+           let list = try? JSONDecoder().decode([AppBackup].self, from: data) {
+            self.retainedBackups = list
+        }
     }
     
     func savePendingBackups() {
         if let data = try? JSONEncoder().encode(pendingBackups) {
             UserDefaults.standard.set(data, forKey: kPendingBackupsKey)
+        }
+        if let data = try? JSONEncoder().encode(retainedBackups) {
+            UserDefaults.standard.set(data, forKey: kRetainedBackupsKey)
+        }
+    }
+    
+    // MARK: - Retained backups (no prompts, rollback only)
+    
+    func retainedBackup(for bundleID: String) -> AppBackup? {
+        retainedBackups.first(where: { $0.bundleID == bundleID })
+    }
+    
+    /// Turns a backup folder into a silent, retained one and prunes older copies of the same app.
+    func retainBackup(bundlePath: String, appName: String, bundleID: String, version: String?, installPath: String) {
+        if bundleID.isEmpty || bundleID == "unknown" { return }
+        let record = AppBackup(
+            bundleID: bundleID,
+            appName: appName,
+            version: version,
+            backupPath: bundlePath,
+            originalInstallPath: installPath,
+            date: Date(),
+            hadLCAppInfo: true
+        )
+        // one retained copy per app
+        if let index = retainedBackups.firstIndex(where: { $0.bundleID == bundleID }) {
+            let old = retainedBackups.remove(at: index)
+            if old.backupPath != bundlePath {
+                try? FileManager.default.removeItem(at: backupDirectory.appendingPathComponent(old.backupPath))
+            }
+        }
+        retainedBackups.append(record)
+        savePendingBackups()
+    }
+    
+    /// Keeps a backup that was waiting for verification, without ever asking again.
+    func keepPendingBackup(_ backup: AppBackup) {
+        if let index = pendingBackups.firstIndex(where: { $0.id == backup.id }) {
+            pendingBackups.remove(at: index)
+            savePendingBackups()
+        }
+        retainBackup(bundlePath: backup.backupPath,
+                     appName: backup.appName,
+                     bundleID: backup.bundleID,
+                     version: backup.version,
+                     installPath: backup.originalInstallPath)
+    }
+    
+    func discardRetained(_ backup: AppBackup) {
+        try? FileManager.default.removeItem(at: backupDirectory.appendingPathComponent(backup.backupPath))
+        if let index = retainedBackups.firstIndex(where: { $0.id == backup.id }) {
+            retainedBackups.remove(at: index)
+            savePendingBackups()
+        }
+    }
+    
+    func clearRetainedBackups() {
+        for backup in retainedBackups {
+            try? FileManager.default.removeItem(at: backupDirectory.appendingPathComponent(backup.backupPath))
+        }
+        retainedBackups.removeAll()
+        savePendingBackups()
+    }
+    
+    var retainedBackupsSizeBytes: Int64 {
+        var total: Int64 = 0
+        for backup in retainedBackups {
+            let folder = backupDirectory.appendingPathComponent(backup.backupPath)
+            if let e = try? FileManager.default.attributesOfItem(atPath: folder.path),
+               let s = e[.size] as? Int64 {
+                total += s
+            }
+        }
+        return total
+    }
+    
+    /// Puts the retained version of an app back in place. Data containers are untouched.
+    func restoreRetainedBackup(_ backup: AppBackup) {        let fm = FileManager.default
+        let folder = backupDirectory.appendingPathComponent(backup.backupPath)
+        guard let backedUpApp = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil))?
+            .first(where: { $0.pathExtension == "app" }) else { return }
+        let dest = currentAppsFolder.appendingPathComponent(backup.originalInstallPath)
+        do {
+            if fm.fileExists(atPath: dest.path) {
+                try fm.removeItem(at: dest)
+            }
+            try fm.moveItem(at: backedUpApp, to: dest)
+            discardRetained(backup)
+            refreshInstalledApps()
+            sendNotification(title: "Rolled Back", body: "\(backup.appName) restored to the previous version.", type: .success)
+        } catch {
+            print("Restore retained backup failed: \(error)")
         }
     }
     
@@ -474,11 +637,28 @@ class DownloadManager: NSObject, ObservableObject {
                 let newData = try Data(contentsOf: newInfoURL)
                 var newPlist = try PropertyListSerialization.propertyList(from: newData, format: nil) as? [String: Any] ?? [:]
                 
+                // Containers used by the previous install: they hold the real data and must never
+                // be deleted by the cleanup below.
+                let oldFolderNames = Set((oldPlist["LCContainers"] as? [[String: Any]] ?? [])
+                    .compactMap { $0["folderName"] as? String })
+                let newFolderNames = Set((newPlist["LCContainers"] as? [[String: Any]] ?? [])
+                    .compactMap { $0["folderName"] as? String })
+                
+                // Already pointing at the old containers => migrated when the update was installed.
+                // Patching again would be a no-op, and cleaning up would delete live data.
+                if !oldFolderNames.isEmpty && newFolderNames == oldFolderNames {
+                    Logger.shared.log("FinalizeUpdate: data was already migrated at install time, dropping backup.")
+                    sendNotification(title: "Update Completed", body: "\(backup.appName) has been successfully updated.", type: .success)
+                    discardBackup(backup)
+                    return
+                }
+                
                 // NEW: Clean up newly created empty containers before restoring old ones
                 if let newContainers = newPlist["LCContainers"] as? [[String: Any]],
                    let dataAppFolder = currentDataApplicationFolder {
                     for container in newContainers {
-                        if let folderName = container["folderName"] as? String {
+                        if let folderName = container["folderName"] as? String,
+                           !oldFolderNames.contains(folderName) {
                             let folderURL = dataAppFolder.appendingPathComponent(folderName)
                             if fileManager.fileExists(atPath: folderURL.path) {
                                 try? fileManager.removeItem(at: folderURL)
@@ -573,6 +753,30 @@ class DownloadManager: NSObject, ObservableObject {
     private func restoreFolders() {
         restoreFolder(key: kCustomDownloadFolderKey) { self.customDownloadFolder = $0 }
         restoreFolder(key: kCustomLiveContainerFolderKey) { self.customLiveContainerFolder = $0 }
+        restoreFolder(key: kCustomBackupFolderKey) { self.customBackupFolder = $0 }
+    }
+    
+    /// Directory used for .ipa archives, resolved to the bundled default when unset.
+    var backupFolderDisplayName: String {
+        if let custom = customBackupFolder { return custom.lastPathComponent }
+        return "Downloads/IPA_Backups"
+    }
+    
+    func setBackupFolder(_ url: URL) {
+        do {
+            guard url.startAccessingSecurityScopedResource() else { return }
+            defer { url.stopAccessingSecurityScopedResource() }
+            let bookmarkData = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+            UserDefaults.standard.set(bookmarkData, forKey: kCustomBackupFolderKey)
+            self.customBackupFolder = url
+        } catch {
+            print("Failed to save backup folder bookmark: \(error)")
+        }
+    }
+    
+    func clearBackupFolder() {
+        UserDefaults.standard.removeObject(forKey: kCustomBackupFolderKey)
+        self.customBackupFolder = nil
     }
     
     private func restoreFolder(key: String, assign: (URL) -> Void) {
@@ -1027,6 +1231,11 @@ class DownloadManager: NSObject, ObservableObject {
     func finalizeInstallation(action: InstallAction) {
         guard let pending = pendingInstallation else { return }
         
+        // A backup recorded by an older build (before data was migrated at install time) still
+        // holds the LCAppInfo.plist that points at the real data containers.
+        let legacyBackup = pendingBackups.first(where: { $0.bundleID == pending.bundleID })
+        let keepPreviousVersion = keepAppBackups
+        
         let fileManager = FileManager.default
         let folder = self.currentAppsFolder
         let downloadDir = self.currentDownloadFolder
@@ -1058,20 +1267,65 @@ class DownloadManager: NSObject, ObservableObject {
                     let lcInfoURL = existingPath.appendingPathComponent("LCAppInfo.plist")
                     let hadInfo = fileManager.fileExists(atPath: lcInfoURL.path)
                     
-                    if !hadInfo {
-                        if fileManager.fileExists(atPath: existingPath.path) {
-                            try fileManager.removeItem(at: existingPath)
-                        }
-                        try fileManager.moveItem(at: pending.extractedAppURL, to: existingPath)
-                    } else {
-                        let backupUUID = UUID().uuidString
-                        let destFolder = backupDir.appendingPathComponent(backupUUID)
+                    // Somewhere we can find an LCAppInfo.plist that still points at real data.
+                    let legacyAppURL = legacyBackup.map {
+                        backupDir.appendingPathComponent($0.backupPath).appendingPathComponent($0.originalInstallPath)
+                    }
+                    let legacyHasInfo = legacyAppURL.map {
+                        fileManager.fileExists(atPath: $0.appendingPathComponent("LCAppInfo.plist").path)
+                    } ?? false
+                    
+                    let backupUUID = UUID().uuidString
+                    let destFolder = backupDir.appendingPathComponent(backupUUID)
+                    var oldBundleURL: URL? = nil
+                    
+                    if hadInfo || legacyHasInfo {
+                        // Park the current bundle so its LCAppInfo.plist survives the swap.
                         try fileManager.createDirectory(at: destFolder, withIntermediateDirectories: true)
-                        
-                        let backupDest = destFolder.appendingPathComponent(existingPath.lastPathComponent)
-                        
-                        try fileManager.moveItem(at: existingPath, to: backupDest)
-                        
+                        if fileManager.fileExists(atPath: existingPath.path) {
+                            let backupDest = destFolder.appendingPathComponent(existingPath.lastPathComponent)
+                            try fileManager.moveItem(at: existingPath, to: backupDest)
+                            oldBundleURL = backupDest
+                        }
+                    } else if fileManager.fileExists(atPath: existingPath.path) {
+                        try fileManager.removeItem(at: existingPath)
+                    }
+                    
+                    try fileManager.moveItem(at: pending.extractedAppURL, to: existingPath)
+                    
+                    // The legacy backup wins: the bundle we just replaced may already be a fresh
+                    // install pointing at an empty container.
+                    let migrationSource = (legacyHasInfo ? legacyAppURL : nil) ?? oldBundleURL
+                    var migrated = false
+                    if let source = migrationSource {
+                        migrated = migrateLCAppInfo(from: source, to: existingPath)
+                    }
+                    
+                    if migrated {
+                        // Data is re-linked, so no post-launch verification is ever needed.
+                        // Keep the previous build around silently for rollback instead of
+                        // asking the user to deal with a "delete backup" prompt.
+                        if keepPreviousVersion {
+                            await MainActor.run {
+                                self.retainBackup(bundlePath: backupUUID,
+                                                  appName: existing.name,
+                                                  bundleID: existing.bundleID,
+                                                  version: existing.version,
+                                                  installPath: existingPath.lastPathComponent)
+                            }
+                        } else {
+                            try? fileManager.removeItem(at: destFolder)
+                        }
+                        if let legacy = legacyBackup {
+                            await MainActor.run { self.discardBackup(legacy) }
+                        }
+                        await MainActor.run {
+                            self.sendNotification(title: "Update Installed",
+                                                  body: "\(existing.name) updated, existing data kept.",
+                                                  type: .success)
+                        }
+                    } else if hadInfo {
+                        // Fallback: keep the old behaviour (launch once, then LBox verifies).
                         let backupRecord = AppBackup(
                             bundleID: existing.bundleID,
                             appName: existing.name,
@@ -1086,8 +1340,11 @@ class DownloadManager: NSObject, ObservableObject {
                             self.pendingBackups.append(backupRecord)
                             self.savePendingBackups()
                         }
-                        
-                        try fileManager.moveItem(at: pending.extractedAppURL, to: existingPath)
+                    } else {
+                        try? fileManager.removeItem(at: destFolder)
+                        if let legacy = legacyBackup {
+                            await MainActor.run { self.discardBackup(legacy) }
+                        }
                     }
                     
                 case .cancel:

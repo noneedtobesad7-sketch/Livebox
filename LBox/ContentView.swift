@@ -65,6 +65,7 @@ struct ContentView: View {
                     }
                 }
                 Button("Cancel Update (Restore)") { downloadManager.restoreBackup(backup) }
+                Button("Keep Backup") { downloadManager.keepPendingBackup(backup) }
                 // Modified to separate delete logic to optionally delete containers
                 Button("Delete Backup", role: .destructive) { downloadManager.discardBackup(backup, deleteContainers: true) }
             } message: { backup in
@@ -302,7 +303,7 @@ struct InstalledAppsView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "questionmark.circle.fill")
                         .foregroundColor(.orange)
-                    Text("\(github.candidates.count) 个应用待确认更新源")
+                    Text("\(github.candidates.count) apps need a source confirmation")
                         .font(.subheadline.bold())
                         .foregroundColor(.primary)
                     Spacer()
@@ -515,7 +516,7 @@ struct InstalledAppItem: View {
                         }
                         .buttonStyle(.plain)
                     } else if sourcePending {
-                        Text("源?")
+                        Text("SRC?")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundColor(.orange)
                             .padding(.horizontal, 5)
@@ -537,17 +538,24 @@ struct InstalledAppItem: View {
             if let ver = app.version { Button("Version: \(ver)") {}.disabled(true) }
             Button("Bundle: \(app.bundleID)") {}.disabled(true)
             if let slug = confirmedSlug {
-                Button("源: \(slug)") {}.disabled(true)
+                Button("Source: \(slug)") {}.disabled(true)
             }
             Button {
                 showManualSheet = true
             } label: {
-                Label(confirmedSlug == nil ? "手动绑定更新源" : "更换更新源", systemImage: "link")
+                Label(confirmedSlug == nil ? "Bind Update Source" : "Change Update Source", systemImage: "link")
             }
             Button {
                 Task { await github.recheckSource(for: app.bundleID) }
             } label: {
-                Label("重新确认更新源", systemImage: "arrow.triangle.2.circlepath")
+                Label("Re-confirm Update Source", systemImage: "arrow.triangle.2.circlepath")
+            }
+            if let retained = downloadManager.retainedBackup(for: app.bundleID) {
+                Button {
+                    downloadManager.restoreRetainedBackup(retained)
+                } label: {
+                    Label("Rollback to \(retained.version ?? "previous")", systemImage: "arrow.uturn.backward")
+                }
             }
             Button("File: \(app.url.lastPathComponent)") {}.disabled(true)
             #if DEBUG
@@ -789,6 +797,9 @@ struct SettingsView: View {
     @State private var showCopyAlert = false
     @State private var didSelectLiveContainer = false
     @State private var showSettingsHelp = false
+    @State private var pickingBackupFolder = false
+    @State private var showBindingImport = false
+    @State private var showBindingsExported = false
     var body: some View {
         NavigationStack {
             List {
@@ -801,6 +812,7 @@ struct SettingsView: View {
                         }
                         Button("Select") { 
                             isPickingLiveContainer = false
+                            pickingBackupFolder = false
                             showFolderImporter = true 
                         } 
                     }
@@ -812,9 +824,24 @@ struct SettingsView: View {
                         }
                         Button("Select") { 
                             isPickingLiveContainer = true
+                            pickingBackupFolder = false
                             showFolderImporter = true 
                         } 
                     }
+                    HStack {
+                        Text("IPA Backups")
+                        Spacer()
+                        if dm.customBackupFolder != nil {
+                            Button("Default") { dm.clearBackupFolder() }.buttonStyle(.bordered)
+                        }
+                        Button("Select") {
+                            pickingBackupFolder = true
+                            showFolderImporter = true
+                        }
+                    }
+                    Text(dm.backupFolderDisplayName)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     Toggle("Auto .ipa to .app", isOn: $dm.isAutoUnzipEnabled)
                 }
                 Section("Store") {
@@ -833,6 +860,21 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+                Section("App Backups") {
+                    Toggle("Keep Previous Version", isOn: $dm.keepAppBackups)
+                    HStack {
+                        Text("Kept")
+                        Spacer()
+                        Text("\(dm.retainedBackups.count) · \(ByteCountFormatter.string(fromByteCount: dm.retainedBackupsSizeBytes, countStyle: .file))")
+                            .foregroundColor(.secondary)
+                    }
+                    if !dm.retainedBackups.isEmpty {
+                        Button("Clear Backups", role: .destructive) { dm.clearRetainedBackups() }
+                    }
+                    Text("The previous build of each updated app is kept for rollback and never asks you to confirm anything. Long-press an app in Apps to roll back.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
                 Section("GitHub Sources") {
                     HStack {
                         Text("Tracked")
@@ -846,7 +888,7 @@ struct SettingsView: View {
                         Text("\(github.candidates.count)")
                             .foregroundColor(github.candidates.isEmpty ? Color.secondary : Color.orange)
                     }
-                    Text("在 Apps 页顶部的橙色提示条里确认更新源，确认一次后会永久绑定。")
+                    Text("Confirm update sources from the orange banner on the Apps tab. A confirmation is permanent.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     TextField("Personal access token (optional)", text: $gitHubToken)
@@ -866,6 +908,17 @@ struct SettingsView: View {
                             .foregroundColor(.secondary)
                     }
                     Text("A token raises the GitHub API limit from 60 to 5000 requests per hour.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Button("Export Bindings") {
+                        let payload = github.exportBindingsJSON()
+                        if !payload.isEmpty {
+                            UIPasteboard.general.string = payload
+                            showBindingsExported = true
+                        }
+                    }
+                    Button("Import Bindings") { showBindingImport = true }
+                    Text("Bindings live inside the app, so reinstalling or changing the bundle ID loses them. Export first, then import after installing.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -890,7 +943,10 @@ struct SettingsView: View {
                     Button("Import Repos (JSON)") { showImporter = true }
                 }
                 Section("About") {
-                    Text("LBox v1.2")
+                    Text("Livebox \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")")
+                    Text("A fork of LBox by Lolendor (MIT), enhanced with GitHub release tracking, IPA archiving, batch updates and updates that keep your app data. LBox and this fork are not affiliated.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     #if DEBUG
                     NavigationLink("Debug Logs") { DebugLogView() }
                     #endif
@@ -900,13 +956,18 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: [.folder]) { res in 
                 if case .success(let url) = res { 
-                    if isPickingLiveContainer {
+                    if pickingBackupFolder {
+                        dm.setBackupFolder(url)
+                        pickingBackupFolder = false
+                    } else if isPickingLiveContainer {
                         dm.setCustomFolder(url, forApps: true) 
                         didSelectLiveContainer = true 
                     } else {
                         dm.setCustomFolder(url, forApps: false)
                     }
-                } 
+                } else {
+                    pickingBackupFolder = false
+                }
             }
             .onChange(of: showFolderImporter) { isPresented in 
                 // Only run Help logic if we were picking for LiveContainer
@@ -935,6 +996,12 @@ struct SettingsView: View {
             
             .sheet(isPresented: $showExporter) { ShareSheet(activityItems: [exportJSONString]) }
             .sheet(isPresented: $showImporter) { ImportJSONView(viewModel: viewModel) }
+            .sheet(isPresented: $showBindingImport) { BindingImportSheet(center: github) }
+            .alert("Bindings copied", isPresented: $showBindingsExported) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("The bindings JSON is on the clipboard. Keep it somewhere safe, then paste it into Import Bindings after installing the new build.")
+            }
             .alert("Have trouble selecting?", isPresented: $showSettingsHelp) { Button("Open LiveContainer") { if let url = URL(string: "livecontainer://install") { UIApplication.shared.open(url) } }; Button("Cancel", role: .cancel) { } } message: { Text("Solution: Open LiveContainer, find LBox in the \"My Apps\" list, press and hold the icon, tap Settings, and enable Fix File Picker. Then try selecting the directory again.") }
         }
     }
@@ -1004,7 +1071,7 @@ struct SourceConfirmationSheet: View {
         NavigationStack {
             List {
                 Section {
-                    Text("确认后会把该仓库永久绑定到这个 App，之后只用它检查更新。识别方式：下载记录 > 你添加的源 > GitHub 搜索。")
+                    Text("Confirming binds this repository to the app permanently; updates are then checked against it only. Found via download history > your sources > GitHub search.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -1012,16 +1079,16 @@ struct SourceConfirmationSheet: View {
                     SourceCandidateRow(candidate: candidate)
                 }
             }
-            .navigationTitle("确认更新源")
+            .navigationTitle("Confirm Update Source")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
+                    Button("Done") { dismiss() }
                 }
             }
             .overlay {
                 if center.candidates.isEmpty {
-                    ContentUnavailableView("没有待确认的源", systemImage: "checkmark.seal", description: Text("回到 Apps 页点 Check Updates 可重新识别。"))
+                    ContentUnavailableView("No pending sources", systemImage: "checkmark.seal", description: Text("Go back to the Apps tab and tap Check Updates to scan again."))
                 }
             }
         }
@@ -1077,11 +1144,11 @@ struct SourceCandidateRow: View {
                     .foregroundColor(.blue)
                     .lineLimit(1)
                 if let version = candidate.latestVersion {
-                    Text("最新版本 v\(version)" + (candidate.latestIsPrerelease ? " · 预发行" : ""))
+                    Text("Latest v\(version)" + (candidate.latestIsPrerelease ? " · pre-release" : ""))
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 } else {
-                    Text("没有找到 .ipa 资产")
+                    Text("No .ipa asset found")
                         .font(.caption2)
                         .foregroundColor(.orange)
                 }
@@ -1097,7 +1164,7 @@ struct SourceCandidateRow: View {
                 Button {
                     Task { await center.confirm(candidate.bundleID) }
                 } label: {
-                    Text("确认").font(.caption.bold())
+                    Text("Confirm").font(.caption.bold())
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -1105,7 +1172,7 @@ struct SourceCandidateRow: View {
                 Button {
                     center.ignore(candidate.bundleID)
                 } label: {
-                    Text("忽略").font(.caption)
+                    Text("Ignore").font(.caption)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -1115,7 +1182,7 @@ struct SourceCandidateRow: View {
                         UIApplication.shared.open(url)
                     }
                 } label: {
-                    Text("打开").font(.caption)
+                    Text("Open").font(.caption)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -1144,28 +1211,28 @@ struct ManualSourceSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("GitHub 链接") {
+                Section("GitHub Link") {
                     TextField("https://github.com/owner/repo", text: $link)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                     
                     if let ref = parsedRef {
-                        Text("识别为 \(ref.slug)")
+                        Text("Detected \(ref.slug)")
                             .font(.caption)
                             .foregroundColor(.green)
                     } else if !link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text("认不出仓库：可以贴 github.com/owner/repo、releases 链接，或直接写 owner/repo")
+                        Text("Unrecognised repository. Paste a github.com/owner/repo link, a release link, or owner/repo.")
                             .font(.caption)
                             .foregroundColor(.orange)
                     }
                 }
                 
-                Section("预览") {
+                Section("Preview") {
                     if isPreviewing {
                         HStack(spacing: 8) {
                             ProgressView()
-                            Text("查询中…")
+                            Text("Checking…")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -1174,7 +1241,7 @@ struct ManualSourceSheet: View {
                             .font(.caption)
                             .foregroundColor(.orange)
                     } else if let preview {
-                        Text("最新版本 v\(preview.version)" + (preview.isPrerelease ? " · 预发行" : ""))
+                        Text("Latest v\(preview.version)" + (preview.isPrerelease ? " · pre-release" : ""))
                             .font(.subheadline)
                         if let assetName = preview.assetName {
                             Text(assetName)
@@ -1182,26 +1249,26 @@ struct ManualSourceSheet: View {
                                 .foregroundColor(.secondary)
                         }
                     } else {
-                        Text("贴入链接后自动查询")
+                        Text("Paste a link to preview")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
                 }
                 
                 Section {
-                    Text("绑定后只会用这个仓库的 Releases 检查「\(app.name)」的更新，并且不会再询问。")
+                    Text("Updates for \(app.name) will only be checked against this GitHub repository, and you won't be asked again.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
-            .navigationTitle("手动绑定更新源")
+            .navigationTitle("Bind Update Source")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("绑定") {
+                    Button("Bind") {
                         guard let ref = parsedRef else { return }
                         Task {
                             await center.bindManually(bundleID: app.bundleID, ref: ref)
@@ -1230,7 +1297,61 @@ struct ManualSourceSheet: View {
         isPreviewing = true
         let result = await center.previewSource(ref, appName: app.name)
         preview = result
-        previewError = result == nil ? "这个仓库里没找到 .ipa 资产" : ""
+        previewError = result == nil ? "No .ipa asset found in this repository" : ""
         isPreviewing = false
+    }
+}
+
+// MARK: - Binding Transfer
+
+struct BindingImportSheet: View {
+    @ObservedObject var center: GitHubSourceCenter
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var message = ""
+    
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Bindings JSON") {
+                    TextEditor(text: $text)
+                        .frame(minHeight: 180)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    Button("Paste from Clipboard") {
+                        if let s = UIPasteboard.general.string { text = s }
+                    }
+                }
+                if !message.isEmpty {
+                    Section {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Section {
+                    Text("Importing merges these bindings into the app. Only entries with the same bundle ID are overwritten.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .navigationTitle("Import Bindings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Import") {
+                        let count = center.importBindingsJSON(text)
+                        message = count > 0 ? "Imported \(count) binding(s)." : "No valid bindings found."
+                        if count > 0 {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { dismiss() }
+                        }
+                    }
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
     }
 }

@@ -131,6 +131,12 @@ struct BoundSource: Codable, Sendable {
     var updatedAt: Date
 }
 
+/// Transfer payload for exporting/importing bindings between installs.
+struct GitHubBindingsExport: Codable {
+    var version: Int
+    var bindings: [String: BoundSource]
+}
+
 /// A proposal waiting for the user's confirmation.
 struct SourceCandidate: Identifiable, Equatable {
     var id: String { bundleID }
@@ -558,6 +564,40 @@ final class GitHubSourceCenter: ObservableObject {
         GitHubProvenanceStore.shared.setRef(ref, state: .confirmed, confidence: .manual, for: bundleID)
         candidates.removeAll { $0.bundleID == bundleID }
         await refresh(installedApps: lastInstalledApps, storeApps: lastStoreApps)
+    }
+
+    // MARK: Transfer
+
+    /// Serialises every binding so it can be carried over to a new install or a new bundle ID.
+    func exportBindingsJSON() -> String {
+        let payload = GitHubBindingsExport(version: 1, bindings: GitHubProvenanceStore.shared.sources)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(payload),
+              let text = String(data: data, encoding: .utf8) else { return "" }
+        return text
+    }
+
+    /// Merges bindings from a previously exported payload. Returns how many were applied.
+    @discardableResult
+    func importBindingsJSON(_ text: String) -> Int {
+        guard let data = text.data(using: .utf8) else { return 0 }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let payload = try? decoder.decode(GitHubBindingsExport.self, from: data) else { return 0 }
+        var applied = 0
+        for (bundleID, bound) in payload.bindings where !bundleID.isEmpty {
+            GitHubProvenanceStore.shared.setRef(bound.ref,
+                                                state: bound.state,
+                                                confidence: bound.confidence,
+                                                for: bundleID)
+            applied += 1
+        }
+        if applied > 0 {
+            Task { await refresh(installedApps: lastInstalledApps, storeApps: lastStoreApps) }
+        }
+        return applied
     }
 
     // MARK: Helpers

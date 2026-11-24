@@ -835,13 +835,33 @@ class AppStoreViewModel: ObservableObject {
     }
     
     func resetReposToDefault() {
-        // Set default repos to a remote folder list
-        if let url = URL(string: "https://lolendor.github.io/LBox/default_repos.csv") {
-            let folder = SavedRepo(folderName: "Recommended", repoListURL: url)
-            savedRepos = [folder]
+        // Use the list that ships inside the app, so the defaults never depend on a remote
+        // server that can disappear. Falls back to the upstream list only if the bundled
+        // file is missing.
+        var children: [SavedRepo] = []
+        if let path = Bundle.main.path(forResource: "default_repos", ofType: "csv"),
+           let text = try? String(contentsOfFile: path, encoding: .utf8) {
+            let urls = text.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            for item in urls {
+                if let url = URL(string: item) {
+                    children.append(SavedRepo(url: url))
+                }
+            }
+        }
+        
+        if children.isEmpty,
+           let url = URL(string: "https://lolendor.github.io/LBox/default_repos.csv") {
+            savedRepos = [SavedRepo(folderName: "Recommended", repoListURL: url)]
             saveRepos()
             Task { await fetchAllRepos() }
+            return
         }
+        
+        savedRepos = [SavedRepo(folderName: "Recommended", children: children)]
+        saveRepos()
+        Task { await fetchAllRepos() }
     }
     
     func fetchRemoteFolderList(folderID: String, fetchApps: Bool = false) async {
