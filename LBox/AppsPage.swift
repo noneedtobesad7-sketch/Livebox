@@ -654,7 +654,7 @@ struct AppSwitcherSheet: View {
             .searchable(text: $query, prompt: Text(L10n.t("搜索应用", "Search apps")))
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(Text(L10n.t("完成", "Done"))) { dismiss() }
+                    Button(L10n.t("完成", "Done")) { dismiss() }
                 }
             }
         }
