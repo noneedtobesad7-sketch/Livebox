@@ -1032,7 +1032,7 @@ struct SettingsView: View {
                             Text(SettingsView.repoSortLabel(option)).tag(option)
                         }
                     }
-                    Picker(Text(L10n.t("源更新频率", "Refresh Sources")), selection: $sourceRefreshDays) {
+                    Picker(L10n.t("源更新频率", "Refresh Sources"), selection: $sourceRefreshDays) {
                         Text(L10n.t("1 天", "Every 1 day")).tag(1)
                         Text(L10n.t("2 天", "Every 2 days")).tag(2)
                         Text(L10n.t("3 天", "Every 3 days")).tag(3)
