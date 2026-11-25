@@ -1274,6 +1274,26 @@ class DownloadManager: NSObject, ObservableObject {
         if isBatchUpdating { advanceBatchUpdate() }
     }
     
+    /// Extracts the .ipa into the applications folder the way upstream LBox did, without going
+    /// through LiveContainer's install flow. The app has to be launched once afterwards so
+    /// LiveContainer can (re)prepare it.
+    func extractWithoutLiveContainer(file: URL) {
+        Task {
+            _ = await MainActor.run { self.extractingFiles.insert(file) }
+            do {
+                try await extractApp(from: file)
+                _ = await MainActor.run {
+                    self.extractingFiles.remove(file)
+                    self.refreshFileList()
+                    self.refreshInstalledApps()
+                }
+            } catch {
+                Logger.shared.log("Legacy extract failed: \(error)")
+                _ = await MainActor.run { self.extractingFiles.remove(file) }
+            }
+        }
+    }
+
     func convertToApp(file: URL) {
         if installViaLiveContainer {
             Task { _ = await handOffToLiveContainer(file) }

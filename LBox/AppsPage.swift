@@ -113,6 +113,7 @@ struct InstalledAppsView: View {
     @State private var pendingInstall: PendingInstall? = nil
     @State private var shareURL: URL? = nil
     @State private var showSwitcher = false
+    @State private var showRestartConfirm = false
     @State private var isScanning = false
     @AppStorage("kInstalledSort") private var sortRaw: String = "name"
 
@@ -197,16 +198,16 @@ struct InstalledAppsView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Menu {
                         Button {
-                            openLiveContainer()
-                        } label: {
-                            Label(L10n.t("回到 LiveContainer", "Back to LiveContainer"),
-                                  systemImage: "square.stack.3d.up")
-                        }
-                        Button {
                             showSwitcher = true
                         } label: {
                             Label(L10n.t("切换到其他 App…", "Switch to another app…"),
                                   systemImage: "arrow.left.arrow.right")
+                        }
+                        Button {
+                            showRestartConfirm = true
+                        } label: {
+                            Label(L10n.t("重启到 LiveContainer", "Restart into LiveContainer"),
+                                  systemImage: "arrow.clockwise")
                         }
                     } label: {
                         LiveContainerPill()
@@ -238,23 +239,24 @@ struct InstalledAppsView: View {
                     }
                 }
             }
-            .alert(Text(L10n.t("打开 LiveContainer 完成更新", "Open LiveContainer to finish updating")),
+            .alert(Text(L10n.t("安装这个 ipa", "Install this ipa")),
                    isPresented: installAlertBinding) {
-                Button((L10n.t("继续", "Continue"))) {
+                Button((L10n.t("交给 LiveContainer（分享面板）", "Hand to LiveContainer (share sheet)"))) {
                     let request = pendingInstall
                     pendingInstall = nil
-                    if let request {
-                        // LiveContainer installs through its share extension: hand it the file
-                        // with the system share sheet (the URL scheme is not supported).
-                        shareURL = request.file
-                    }
+                    if let request { shareURL = request.file }
                 }
-                Button((L10n.t("取消", "Cancel")), role: .cancel) {
+                Button((L10n.t("解压到 Applications（旧版方式）", "Extract into Applications (legacy)"))) {
+                    let request = pendingInstall
+                    pendingInstall = nil
+                    if let request { downloadManager.extractWithoutLiveContainer(file: request.file) }
+                }
+                Button(Text(L10n.t("取消", "Cancel")), role: .cancel) {
                     pendingInstall = nil
                 }
             } message: {
-                Text(L10n.t("下一步在分享面板里选择 LiveContainer，由它打补丁并完成安装；装好后切回这里可以继续下一个。",
-                            "Pick LiveContainer in the share sheet so it can patch and install the app. Come back here for the next one."))
+                Text(L10n.t("交给 LiveContainer：由它打补丁并安装。旧版方式：解压进 Applications，之后必须在 LiveContainer 里启动一次那个 App。",
+                            "Hand it to LiveContainer so it patches and installs. Legacy: extract into Applications, then launch that app once in LiveContainer."))
             }
             .sheet(isPresented: $showSwitcher) {
                 AppSwitcherSheet(apps: downloadManager.installedApps)
@@ -466,8 +468,13 @@ struct InstalledAppsView: View {
         }
     }
 
-    /// Guest apps run inside LiveContainer's own process, so there is no separate "home" to
-    /// switch to: the launch route (same one the app icons use) is the only reliable entry.
+    /// Livebox runs inside LiveContainer, so terminating this process terminates LC too; opening
+    /// LC again lands on its own app list. That is the only reliable way back to LC's UI.
+    private func restartIntoLiveContainer() {
+        exit(0)
+    }
+
+    /// Launches LiveContainer itself for versions that accept the bare scheme.
     private func openLiveContainer() {
         let candidates = ["livecontainer://livecontainer-launch", "livecontainer://"]
         openFirst(candidates.map { URL(string: $0) }.compactMap { $0 })
