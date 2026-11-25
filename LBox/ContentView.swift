@@ -8,8 +8,11 @@ struct ContentView: View {
     @State private var selectedTab: Int = 0
     @State private var showSetupAlert = false
     @State private var showSetupPicker = false
-    @State private var showFilePickerHelp = false 
+    @State private var showFilePickerHelp = false
+    @State private var showDownloadSetupAlert = false 
     @AppStorage("kHasAskedForLiveContainerSetup") private var hasAskedForSetup = false
+    @AppStorage("kHasAskedDownloadFolder") private var hasAskedDownloadFolder = false
+    @State private var pickingDownloadFolder = false
     
     // Alert States
     @State private var verificationBackup: AppBackup? = nil
@@ -32,6 +35,8 @@ struct ContentView: View {
         }
         .environment(\.locale, effectiveLocale)
         .preferredColorScheme(preferredScheme)
+        // L10n reads kAppLanguage directly, so rebuild the tree when it changes.
+        .id(appLanguage)
         .task { await performInitialSetup() }
         .onChange(of: viewModel.displayApps.count) { _ in viewModel.checkForUpdates(installedApps: downloadManager.installedApps) }
         .onChange(of: downloadManager.installedApps) { newApps in viewModel.checkForUpdates(installedApps: newApps) }
@@ -84,8 +89,24 @@ struct ContentView: View {
             } message: {
                 Text("To enable auto-installation and launching, please select your LiveContainer storage directory.")
             }
+            .alert(Text(L10n.t("设置下载目录", "Choose a download folder")), isPresented: $showDownloadSetupAlert) {
+                Button(Text(L10n.t("选择文件夹", "Select Folder"))) {
+                    hasAskedDownloadFolder = true
+                    pickingDownloadFolder = true
+                    showSetupPicker = true
+                }
+                Button(Text(L10n.t("稍后", "Later")), role: .cancel) {
+                    hasAskedDownloadFolder = true
+                }
+            } message: {
+                Text(L10n.t("Livebox 跑在 LiveContainer 里，默认目录在它的沙盒里、文件 App 看不到。建议选「我的 iPhone/下载」下的文件夹，下载的 ipa 和备份都能直接找到。",
+                            "Livebox runs inside LiveContainer, so its default folder lives in that sandbox and is invisible in Files. Pick a folder under \"On My iPhone\" instead."))
+            }
             .fileImporter(isPresented: $showSetupPicker, allowedContentTypes: [.folder]) { res in
-                if case .success(let url) = res { downloadManager.setCustomFolder(url, forApps: true) }
+                if case .success(let url) = res {
+                    downloadManager.setCustomFolder(url, forApps: !pickingDownloadFolder)
+                }
+                pickingDownloadFolder = false
             }
             .alert("Have trouble selecting?", isPresented: $showFilePickerHelp) {
                 Button("Open LiveContainer") {
@@ -154,7 +175,10 @@ struct ContentView: View {
     // Removed conflictAlertBinding computed property in favor of local @State
     
     func performInitialSetup() async {
-        if viewModel.displayApps.isEmpty { await viewModel.fetchAllRepos() }
+        if viewModel.displayApps.isEmpty && SourceRefresh.shouldRefresh() {
+            SourceRefresh.markFetched()
+            await viewModel.fetchAllRepos()
+        }
         downloadManager.refreshFileList()
         downloadManager.refreshInstalledApps()
         try? await Task.sleep(nanoseconds: 500_000_000)
@@ -163,6 +187,8 @@ struct ContentView: View {
         try? await Task.sleep(nanoseconds: 500_000_000)
         if !hasAskedForSetup && downloadManager.customLiveContainerFolder == nil {
             showSetupAlert = true
+        } else if !hasAskedDownloadFolder && downloadManager.customDownloadFolder == nil {
+            showDownloadSetupAlert = true
         }
     }
     
@@ -170,9 +196,16 @@ struct ContentView: View {
     func autoCheckForUpdatesIfNeeded() async {
         guard autoCheckUpdates else { return }
         guard !viewModel.isLoading else { return }
+
+        // Store sources are only re-downloaded every N days (Settings -> 源更新频率).
+        if SourceRefresh.shouldRefresh() {
+            SourceRefresh.markFetched()
+            await viewModel.fetchAllRepos()
+        }
+
+        // GitHub release checks keep the short in-session throttle.
         guard Date().timeIntervalSince(lastAutoUpdateCheck) > 900 else { return }
         lastAutoUpdateCheck = Date()
-        await viewModel.fetchAllRepos()
         viewModel.checkForUpdates(installedApps: downloadManager.installedApps)
         await GitHubSourceCenter.shared.refresh(
             installedApps: downloadManager.installedApps,
@@ -193,6 +226,13 @@ struct ContentView: View {
         
         if phase == .active {
             Task { await autoCheckForUpdatesIfNeeded() }
+            downloadManager.reconcileDataMigrations()
+            // The conflict dialog is attached to an in-memory pending installation; if the
+            // download finishes while the app is suspended the alert can be dropped, leaving
+            // the extracted copy (and its Temp_ folder) behind. Re-present it on foreground.
+            if downloadManager.pendingInstallation != nil { showConflictAlert = true }
+            // A batch update pauses while LiveContainer installs; continue once we are back.
+            if downloadManager.isWaitingForExternalInstall { downloadManager.resumeAfterExternalInstall() }
             
             // Check the backup currently being verified, or fall back to the latest one
             let backupToCheck = verificationBackup ?? downloadManager.pendingBackups.last
@@ -210,6 +250,15 @@ struct ContentView: View {
 
 // MARK: - Store View
 struct StoreView: View {
+    /// Store sort menu labels (the enum raw values are English UI text).
+    static func sortLabel(_ option: AppSortOption) -> String {
+        switch option {
+        case .name: return L10n.t("名称", "Name")
+        case .date: return L10n.t("日期", "Date")
+        case .size: return L10n.t("大小", "Size")
+        }
+    }
+
     @ObservedObject var viewModel: AppStoreViewModel
     var body: some View {
         NavigationStack {
@@ -236,7 +285,7 @@ struct StoreView: View {
                     Picker("Source", selection: $viewModel.selectedRepoID) {
                         Text("All Sources").tag(String?.none)
                         ForEach(viewModel.getEnabledLeafRepos()) { repo in
-                            Text(repo.name).tag(repo.name as String?)
+                            Text(repo.name == "Recommended" ? L10n.t("推荐", "Recommended") : repo.name).tag(repo.name as String?)
                         }
                     }
                     .pickerStyle(.menu).listRowBackground(Color.clear).padding(.bottom, 5)
@@ -253,7 +302,7 @@ struct StoreView: View {
                     Menu {
                         Picker("Sort By", selection: $viewModel.appSortOrder) {
                             ForEach(AppSortOption.allCases) { option in
-                                Text(option.rawValue).tag(option)
+                                Text(StoreView.sortLabel(option)).tag(option)
                             }
                         }
                     } label: {
@@ -262,7 +311,10 @@ struct StoreView: View {
                 }
             }
             .searchable(text: $viewModel.searchText, prompt: "Search apps, bundles...")
-            .refreshable { await viewModel.fetchAllRepos() }
+            .refreshable {
+                await viewModel.fetchAllRepos()
+                SourceRefresh.markFetched()
+            }
         }
     }
 }
@@ -301,164 +353,6 @@ struct AppListRow: View {
             }
             Spacer()
         }.padding(.vertical, 4)
-    }
-}
-
-struct InstalledAppsView: View {
-    @EnvironmentObject var downloadManager: DownloadManager
-    @Binding var selectedTab: Int
-    @ObservedObject var viewModel: AppStoreViewModel
-    // Changed alignment to .top to prevent icons from shifting when "Update" button is present
-    let columns = [GridItem(.adaptive(minimum: 80, maximum: 100), spacing: 20, alignment: .top)]
-    
-    @ObservedObject var github = GitHubSourceCenter.shared
-    @State private var showSourceSheet = false
-    
-    var updatableApps: [AppItem] {
-        viewModel.updatableItems(for: downloadManager.installedApps)
-    }
-    
-    @ViewBuilder
-    var sourceBanner: some View {
-        if !github.candidates.isEmpty {
-            Button {
-                showSourceSheet = true
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "questionmark.circle.fill")
-                        .foregroundColor(.orange)
-                    Text("\(github.candidates.count) apps need a source confirmation")
-                        .font(.subheadline.bold())
-                        .foregroundColor(.primary)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(12)
-                .background(Color.orange.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .padding(.horizontal)
-                .padding(.top, 8)
-            }
-            .buttonStyle(.plain)
-        }
-    }
-    
-    /// Everything that can be updated right now: GitHub releases first, then store entries.
-    var updateTargets: [BatchUpdateTarget] {
-        var result: [BatchUpdateTarget] = []
-        for app in downloadManager.installedApps {
-            guard let info = github.updates[app.bundleID] else { continue }
-            result.append(BatchUpdateTarget(
-                name: app.name,
-                bundleID: app.bundleID,
-                downloadURL: info.downloadURL,
-                isPrerelease: info.kind == .prerelease
-            ))
-        }
-        let linked = Set(result.map { $0.bundleID })
-        for item in updatableApps where !linked.contains(item.bundleIdentifier) {
-            result.append(BatchUpdateTarget(
-                name: item.name,
-                bundleID: item.bundleIdentifier,
-                downloadURL: item.downloadURL,
-                isPrerelease: VersionText.looksPrerelease(item.version)
-            ))
-        }
-        return result
-    }
-    
-    @ViewBuilder
-    var batchUpdateBanner: some View {
-        if downloadManager.isBatchUpdating {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    ProgressView()
-                    Text("Updating \(downloadManager.batchCurrentName)")
-                        .font(.subheadline).bold()
-                        .lineLimit(1)
-                    Spacer()
-                    Text("\(downloadManager.batchTotalCount - downloadManager.batchRemainingTargets.count)/\(downloadManager.batchTotalCount)")
-                        .font(.caption).foregroundColor(.secondary)
-                }
-                Button("Stop") {
-                    downloadManager.cancelBatchUpdate()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-            .padding(12)
-            .background(Color(uiColor: .secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal)
-            .padding(.top, 8)
-        } else if !updateTargets.isEmpty {
-            Button {
-                _ = downloadManager.startBatchUpdate(targets: updateTargets)
-            } label: {
-                Label("Update All (\(updateTargets.count))", systemImage: "arrow.triangle.2.circlepath")
-                    .font(.subheadline.bold())
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.borderedProminent)
-            .padding(.horizontal)
-            .padding(.top, 8)
-        }
-    }
-    
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 0) {
-                    sourceBanner
-                    batchUpdateBanner
-                    if downloadManager.installedApps.isEmpty {
-                        ContentUnavailableView("No Apps", systemImage: "square.dashed", description: Text("Apps extracted to the applications folder will appear here."))
-                            .padding(.top, 50)
-                    } else {
-                        LazyVGrid(columns: columns, spacing: 24) {
-                            ForEach(downloadManager.installedApps) { app in
-                                InstalledAppItem(app: app, selectedTab: $selectedTab, viewModel: viewModel)
-                            }
-                        }.padding()
-                    }
-                }
-            }
-            .navigationTitle("Apps")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        viewModel.checkForUpdates(installedApps: downloadManager.installedApps)
-                        Task {
-                            await GitHubSourceCenter.shared.refresh(
-                                installedApps: downloadManager.installedApps,
-                                storeApps: viewModel.displayApps
-                            )
-                        }
-                    } label: {
-                        Text("Check Updates")
-                    }
-                }
-            }
-            .task {
-                await GitHubSourceCenter.shared.refresh(
-                    installedApps: downloadManager.installedApps,
-                    storeApps: viewModel.displayApps
-                )
-            }
-            .refreshable {
-                downloadManager.refreshInstalledApps()
-                await GitHubSourceCenter.shared.refresh(
-                    installedApps: downloadManager.installedApps,
-                    storeApps: viewModel.displayApps
-                )
-            }
-            .sheet(isPresented: $showSourceSheet) {
-                SourceConfirmationSheet()
-            }
-        }
     }
 }
 
@@ -506,50 +400,19 @@ struct InstalledAppItem: View {
                     } else {
                         Image(systemName: "app.fill").resizable().frame(width: 70, height: 70).foregroundColor(.gray).cornerRadius(14)
                     }
-                    if newVersion != nil {
-                        Circle()
-                            .fill(isPrereleaseUpdate ? Color.orange : Color.red)
-                            .frame(width: 12, height: 12)
-                            .offset(x: 4, y: -4)
-                    }
                 }
                 Text(app.name).font(.caption).lineLimit(2).frame(height: 35, alignment: .top)
-                // Fixed-height slot: the pill below never changes the cell height,
-                // so neighbouring icons/names in the grid stay on the same line.
-                // Only one pill is shown at a time ("Update" wins) to keep the
-                // ~93pt-wide cell from overflowing on narrow iPhones.
-                HStack(spacing: 4) {
-                    if newVersion != nil {
-                        Button {
-                            if let update = githubUpdate {
-                                downloadManager.installGitHubUpdate(update)
-                            } else if let item = viewModel.bestStoreItem(for: app.bundleID) {
-                                downloadManager.installFromStore(item)
-                            } else {
-                                viewModel.searchText = app.bundleID
-                                selectedTab = 0
-                            }
-                        } label: {
-                            Text(isPrereleaseUpdate ? "Pre" : "Update")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(isPrereleaseUpdate ? Color.orange : Color.blue)
-                                .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    } else if sourcePending {
-                        Text("SRC?")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(.orange)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Color.orange.opacity(0.15))
-                            .clipShape(Capsule())
-                    }
+
+                // No buttons in the grid: updates are downloaded / installed from the Bound list.
+                if let version = app.version {
+                    Text(version)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .frame(height: 14)
+                } else {
+                    Color.clear.frame(height: 14)
                 }
-                .frame(height: 22)
             }
         }
         .buttonStyle(.plain)
@@ -559,10 +422,10 @@ struct InstalledAppItem: View {
             Button { viewModel.searchText = app.name; selectedTab = 0 } label: { Label("Search Name", systemImage: "magnifyingglass") }
             Button { viewModel.searchText = app.bundleID; selectedTab = 0 } label: { Label("Search Bundle ID", systemImage: "barcode.viewfinder") }
             Divider()
-            if let ver = app.version { Button("Version: \(ver)") {}.disabled(true) }
-            Button("Bundle: \(app.bundleID)") {}.disabled(true)
+            if let ver = app.version { Button(L10n.t("版本：\(ver)", "Version: \(ver)")) {}.disabled(true) }
+            Button(L10n.t("Bundle ID：\(app.bundleID)", "Bundle: \(app.bundleID)")) {}.disabled(true)
             if let slug = confirmedSlug {
-                Button("Source: \(slug)") {}.disabled(true)
+                Button(L10n.t("源：\(slug)", "Source: \(slug)")) {}.disabled(true)
             }
             Button {
                 showManualSheet = true
@@ -581,7 +444,7 @@ struct InstalledAppItem: View {
                     Label("Rollback to \(retained.version ?? "previous")", systemImage: "arrow.uturn.backward")
                 }
             }
-            Button("File: \(app.url.lastPathComponent)") {}.disabled(true)
+            Button(L10n.t("文件：\(app.url.lastPathComponent)", "File: \(app.url.lastPathComponent)")) {}.disabled(true)
             #if DEBUG
             Button {
                 let plistURL = app.url.appendingPathComponent("LCAppInfo.plist")
@@ -638,6 +501,27 @@ struct DirectDownloadView: View {
                         }
                     } header: { Text("Active Downloads") }
                 }
+                if !downloadManager.downloadHistory.isEmpty {
+                    Section {
+                        ForEach(downloadManager.downloadHistory) { record in
+                            DownloadHistoryRow(record: record)
+                        }
+                        .onDelete { offsets in
+                            offsets.map { downloadManager.downloadHistory[$0] }
+                                .forEach { downloadManager.removeDownloadRecord($0) }
+                        }
+                    } header: {
+                        HStack {
+                            Text(L10n.t("下载记录", "Downloads"))
+                            Spacer()
+                            Button(L10n.t("清空", "Clear")) {
+                                downloadManager.clearDownloadHistory()
+                            }
+                            .font(.caption)
+                            .foregroundColor(.red)
+                        }
+                    }
+                }
                 Section {
                     ForEach(downloadManager.fileList, id: \.self) { file in
                         FileRow(localURL: file, onRename: {
@@ -655,10 +539,10 @@ struct DirectDownloadView: View {
                         }
                     }
                 } footer: {
-                    Text("Loc: \(downloadManager.customDownloadFolder?.lastPathComponent ?? "Default")")
+                    Text(L10n.t("位置：\(downloadManager.customDownloadFolder?.lastPathComponent ?? "默认")", "Loc: \(downloadManager.customDownloadFolder?.lastPathComponent ?? "Default")"))
                 }
             }
-            .navigationTitle("Direct Download")
+            .navigationTitle(Text(L10n.t("下载管理", "Download Manager")))
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: { showFileImporter = true }) {
@@ -749,6 +633,64 @@ struct DownloadRow: View {
     func format(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
 }
 
+struct DownloadHistoryRow: View {
+    let record: DownloadRecord
+    @EnvironmentObject var downloadManager: DownloadManager
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: iconName)
+                .font(.title3)
+                .foregroundColor(iconColor)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(record.fileName)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                HStack(spacing: 4) {
+                    Text(record.date, style: .time)
+                    if record.bytes > 0 {
+                        Text("•")
+                        Text(ByteCountFormatter.string(fromByteCount: record.bytes, countStyle: .file))
+                    }
+                    if record.state == .failed, let message = record.message {
+                        Text("•")
+                        Text(message).lineLimit(1)
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(record.state == .failed ? .red : .secondary)
+            }
+            Spacer()
+            if record.state == .failed, let url = URL(string: record.url) {
+                Button(L10n.t("重试", "Retry")) {
+                    downloadManager.startDownload(url: url)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var iconName: String {
+        switch record.state {
+        case .finished: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .cancelled: return "xmark.circle"
+        }
+    }
+
+    private var iconColor: Color {
+        switch record.state {
+        case .finished: return .green
+        case .failed: return .red
+        case .cancelled: return .secondary
+        }
+    }
+}
+
 struct FileRow: View {
     let localURL: URL
     @EnvironmentObject var manager: DownloadManager
@@ -804,6 +746,9 @@ struct FileRow: View {
 }
 
 struct SettingsView: View {
+    @AppStorage("kSourceRefreshDays") private var sourceRefreshDays: Int = 1
+    @AppStorage("kBackupAppBeforeUpdate") private var backupAppBeforeUpdate = false
+    @AppStorage("kBackupFullSnapshot") private var backupFullSnapshot = false
     @ObservedObject var viewModel: AppStoreViewModel
     @EnvironmentObject var dm: DownloadManager
     @AppStorage("kAutoCheckUpdates") private var autoCheckUpdates = true
@@ -854,6 +799,16 @@ struct SettingsView: View {
                             showFolderImporter = true 
                         } 
                     }
+                    HStack {
+                        Text(L10n.t("下载占用", "Downloads size"))
+                        Spacer()
+                        Text(ByteCountFormatter.string(fromByteCount: dm.downloadsSizeBytes, countStyle: .file))
+                            .foregroundColor(.secondary)
+                        if dm.downloadsSizeBytes > 0 {
+                            Button(L10n.t("清空", "Clear"), role: .destructive) { dm.clearAllFiles() }
+                                .buttonStyle(.borderless)
+                        }
+                    }
                     HStack { 
                         Text("LiveContainer")
                         Spacer() 
@@ -867,7 +822,7 @@ struct SettingsView: View {
                         } 
                     }
                     HStack {
-                        Text("IPA Backups")
+                        Text(L10n.t("备份目录", "Backups"))
                         Spacer()
                         if dm.customBackupFolder != nil {
                             Button("Default") { dm.clearBackupFolder() }.buttonStyle(.bordered)
@@ -881,6 +836,9 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Toggle("Auto .ipa to .app", isOn: $dm.isAutoUnzipEnabled)
+                    Toggle(L10n.t("用 LiveContainer 安装", "Install via LiveContainer"), isOn: $dm.installViaLiveContainer)
+                    Text("Recommended. Hand the .ipa to LiveContainer so it can patch the app and keep its data; a bundle copied into Applications/ by hand can't be launched.")
+                        .font(.caption).foregroundColor(.secondary)
                 }
                 Section("Store") {
                    Toggle("Strict Grouping", isOn: $viewModel.strictGrouping)
@@ -899,7 +857,15 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
                 Section("App Backups") {
-                    Toggle("Keep Previous Version", isOn: $dm.keepAppBackups)
+                    Toggle(Text(L10n.t("更新前备份当前版本", "Back up the installed build before updating")),
+                           isOn: $backupAppBeforeUpdate)
+                    Toggle(Text(L10n.t("完整快照（含数据）", "Full snapshot (includes app data)")),
+                           isOn: $backupFullSnapshot)
+                        .disabled(!backupAppBeforeUpdate)
+                    Text(L10n.t("只在点「安装」把包交给 LiveContainer 之前备份。只备份程序时，回退后看到的仍是当前数据；打开完整快照才会把数据容器一起还原。回退入口：长按应用。",
+                               "Snapshotted right before LiveContainer installs. An app-only backup rolls back the program but keeps current data; the full snapshot also restores the data container. Roll back by long-pressing an app."))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     HStack {
                         Text("Kept")
                         Spacer()
@@ -909,7 +875,8 @@ struct SettingsView: View {
                     if !dm.retainedBackups.isEmpty {
                         Button("Clear Backups", role: .destructive) { dm.clearRetainedBackups() }
                     }
-                    Text("The previous build of each updated app is kept for rollback and never asks you to confirm anything. Long-press an app in Apps to roll back.")
+                    Text(L10n.t("备份只在点「安装」把包交给 LiveContainer 之前生成，每个 App 只保留最近一份。回退入口：长按应用。",
+                               "Snapshots are taken right before LiveContainer installs, one per app. Roll back by long-pressing an app."))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -963,8 +930,19 @@ struct SettingsView: View {
                 Section("Repositories") {
                     NavigationLink("Manage Sources") { RepoManagementView(viewModel: viewModel, parentID: nil) }
                     Picker("Sort Repos By", selection: $viewModel.repoSortOrder) {
-                        ForEach(RepoSortOption.allCases) { option in Text(option.rawValue).tag(option) }
+                        ForEach(RepoSortOption.allCases) { option in
+                            Text(option == .name ? L10n.t("名称", "Name") : L10n.t("默认", "Default")).tag(option)
+                        }
                     }
+                    Picker(Text(L10n.t("源更新频率", "Refresh Sources")), selection: $sourceRefreshDays) {
+                        Text(L10n.t("1 天", "Every 1 day")).tag(1)
+                        Text(L10n.t("2 天", "Every 2 days")).tag(2)
+                        Text(L10n.t("3 天", "Every 3 days")).tag(3)
+                    }
+                    Text(L10n.t("商店的源 JSON 多久重新下载一次；下拉刷新不受此限制。",
+                                "How often the store re-downloads its repository JSON. Pull to refresh ignores this."))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
                 Section("Backup/Restore") {
                     Menu("Export Repos...") {
@@ -973,7 +951,7 @@ struct SettingsView: View {
                         }
                         Button("Copy as URL List") { UIPasteboard.general.string = viewModel.exportReposURLList() }
                         if #available(iOS 16.0, *) {
-                            ShareLink(item: viewModel.exportReposJSON() ?? "", subject: Text("LBox Repos"), preview: SharePreview("LBox Repos")) { Text("Share JSON File") }
+                            ShareLink(item: viewModel.exportReposJSON() ?? "", subject: Text("Livebox Repos"), preview: SharePreview("Livebox Repos")) { Text("Share JSON File") }
                         } else {
                             Button("Share JSON File") { if let s = viewModel.exportReposJSON() { exportJSONString = s; showExporter = true } }
                         }
@@ -1063,7 +1041,7 @@ struct RepoManagementView: View {
                         NavigationLink(destination: RepoManagementView(viewModel: viewModel, parentID: repo.id)) {
                             HStack {
                                 if repo.isRemoteFolder { Image(systemName: "folder.badge.gear").foregroundColor(.purple) } else { Image(systemName: "folder.fill").foregroundColor(.blue) }
-                                VStack(alignment: .leading) { Text(repo.name).foregroundColor(repo.isEnabled ? .primary : .secondary); Text("\(repo.totalRepoCount) repos • \(repo.totalAppCount) apps").font(.caption).foregroundColor(.secondary) }
+                                VStack(alignment: .leading) { Text(repo.name == "Recommended" ? L10n.t("推荐", "Recommended") : repo.name).foregroundColor(repo.isEnabled ? .primary : .secondary); Text(L10n.t("\(repo.totalRepoCount) 个源 • \(repo.totalAppCount) 个应用", "\(repo.totalRepoCount) repos • \(repo.totalAppCount) apps")).font(.caption).foregroundColor(.secondary) }
                             }
                         }
                         Spacer(); Toggle("", isOn: Binding(get: { repo.isEnabled }, set: { val in viewModel.setRepoEnabled(id: repo.id, enabled: val) })).labelsHidden()
@@ -1104,8 +1082,19 @@ struct ShareSheet: UIViewControllerRepresentable { let activityItems: [Any]; fun
 // MARK: - GitHub Source Confirmation
 
 struct SourceConfirmationSheet: View {
+    /// nil = every candidate ("Bind All"); otherwise only the tapped app's candidate.
+    let bundleIDFilter: String?
     @ObservedObject var center = GitHubSourceCenter.shared
     @Environment(\.dismiss) private var dismiss
+    
+    init(bundleIDFilter: String? = nil) {
+        self.bundleIDFilter = bundleIDFilter
+    }
+    
+    private var items: [SourceCandidate] {
+        guard let filter = bundleIDFilter else { return center.candidates }
+        return center.candidates.filter { $0.bundleID == filter }
+    }
     
     var body: some View {
         NavigationStack {
@@ -1115,7 +1104,7 @@ struct SourceConfirmationSheet: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                ForEach(center.candidates) { candidate in
+                ForEach(items) { candidate in
                     SourceCandidateRow(candidate: candidate)
                 }
             }
@@ -1127,7 +1116,7 @@ struct SourceConfirmationSheet: View {
                 }
             }
             .overlay {
-                if center.candidates.isEmpty {
+                if items.isEmpty {
                     ContentUnavailableView("No pending sources", systemImage: "checkmark.seal", description: Text("Go back to the Apps tab and tap Check Updates to scan again."))
                 }
             }

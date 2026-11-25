@@ -175,3 +175,5 @@
 "Rollback to %@" = "回滚到 %@";
 "Livebox %@" = "Livebox %@";
 "A fork of LBox by Lolendor (MIT), enhanced with GitHub release tracking, IPA archiving, batch updates and updates that keep your app data. LBox and this fork are not affiliated." = "基于 Lolendor 的 LBox（MIT 许可）修改增强：新增 GitHub Releases 更新检测、IPA 备份、批量更新，以及更新时保留 App 数据。与 LBox 官方无隶属关系。";
+"Install via LiveContainer" = "用 LiveContainer 安装";
+"Livebox Repos" = "Livebox 源";

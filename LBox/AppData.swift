@@ -54,6 +54,24 @@ struct AppItem: Codable, Identifiable, Hashable, Sendable {
     let screenshotURLs: [String]
     
     var sourceRepoName: String? = nil
+
+    /// AltStore sources write `versionDate` with wildly different precision. Parsing it keeps the
+    /// "Date" sort stable even when a source is sloppy (`2024/5/1`, missing time, etc.).
+    nonisolated var parsedVersionDate: Date? {
+        guard let raw = versionDate?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        let iso = ISO8601DateFormatter()
+        if let date = iso.date(from: raw) { return date }
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = iso.date(from: raw) { return date }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        for format in ["yyyy-MM-dd'T'HH:mm:ssZ", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd", "yyyy/MM/dd"] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: raw) { return date }
+        }
+        return nil
+    }
     
     enum CodingKeys: String, CodingKey {
         case name, bundleIdentifier, bundleID
@@ -1117,7 +1135,7 @@ class AppStoreViewModel: ObservableObject {
                     if v1 != v2 {
                         return v1.compare(v2, options: .numeric) == .orderedDescending
                     }
-                    return ($0.versionDate ?? "") > ($1.versionDate ?? "")
+                    return ($0.parsedVersionDate ?? .distantPast) > ($1.parsedVersionDate ?? .distantPast)
                 }).first {
                     representatives.append(latest)
                 }
@@ -1128,9 +1146,10 @@ class AppStoreViewModel: ObservableObject {
                 case .name:
                     return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
                 case .date:
-                    let lDate = lhs.versionDate ?? ""
-                    let rDate = rhs.versionDate ?? ""
-                    return lDate > rDate
+                    let lDate = lhs.parsedVersionDate ?? .distantPast
+                    let rDate = rhs.parsedVersionDate ?? .distantPast
+                    if lDate != rDate { return lDate > rDate }
+                    return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
                 case .size:
                     let lSize = lhs.size ?? 0
                     let rSize = rhs.size ?? 0

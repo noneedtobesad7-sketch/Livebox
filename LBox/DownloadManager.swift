@@ -20,6 +20,23 @@ enum InstallAction {
     case cancel
 }
 
+/// One entry of the download history shown in the Downloads tab.
+struct DownloadRecord: Codable, Identifiable, Sendable {
+    enum State: String, Codable, Sendable {
+        case finished
+        case failed
+        case cancelled
+    }
+
+    let id: String
+    var url: String
+    var fileName: String
+    var state: State
+    var date: Date
+    var bytes: Int64
+    var message: String?
+}
+
 struct PendingInstallation: Identifiable {
     let id = UUID()
     let appName: String
@@ -50,15 +67,18 @@ struct BatchUpdateTarget: Identifiable, Hashable {
     let isPrerelease: Bool
 }
 
-/// Re-attaches the LiveContainer metadata of a previous install to the freshly deployed bundle.
+/// Re-attaches the LiveContainer data pointer of a previous install to the freshly deployed bundle.
 ///
 /// LiveContainer keeps an app's per-app data in `Data/Application/<folderName>` and records the
 /// folder name in `LCAppInfo.plist` *inside the .app folder*. A plain bundle replacement drops
 /// that plist, so the next launch makes LiveContainer believe it is a brand new app and create an
 /// empty container - which is what looked like "the update wiped my data".
 ///
-/// Merging the old plist in right after the copy means the first launch already points at the
-/// existing container, so no data is lost and no "launch once, then come back" step is needed.
+/// Only `LCContainers` / `LCDataUUID` are carried over. Every other key describes how the
+/// *previous* binary was prepared (`LCPatchRevision`, `dontSign`, `is32bit` ...). Copying those
+/// makes LiveContainer believe the new binary is already patched, so it skips the patch step and
+/// tries to dlopen a raw MH_EXECUTE - which fails with "cannot dlopen a main executable".
+/// `LCDataMigration` reconciles the data on disk if LiveContainer ignores this plist anyway.
 func migrateLCAppInfo(from oldAppURL: URL, to newAppURL: URL) -> Bool {
     let fm = FileManager.default
     let oldInfoURL = oldAppURL.appendingPathComponent("LCAppInfo.plist")
@@ -66,26 +86,18 @@ func migrateLCAppInfo(from oldAppURL: URL, to newAppURL: URL) -> Bool {
 
     guard fm.fileExists(atPath: oldInfoURL.path),
           let oldData = try? Data(contentsOf: oldInfoURL),
-          let oldPlist = try? PropertyListSerialization.propertyList(from: oldData, format: nil) as? [String: Any] else {
-        return false
-    }
-    // Without containers there is nothing to preserve, and copying such a plist would only stop
-    // LiveContainer from creating a fresh container on first launch.
-    guard let containers = oldPlist["LCContainers"] as? [[String: Any]], !containers.isEmpty else {
+          let oldPlist = try? PropertyListSerialization.propertyList(from: oldData, format: nil) as? [String: Any],
+          let containers = oldPlist["LCContainers"] as? [[String: Any]],
+          !containers.isEmpty else {
         return false
     }
 
-    var merged = oldPlist
-    if fm.fileExists(atPath: newInfoURL.path),
-       let newData = try? Data(contentsOf: newInfoURL),
-       let newPlist = try? PropertyListSerialization.propertyList(from: newData, format: nil) as? [String: Any] {
-        // Keep keys the new bundle knows about, but the previous install wins for anything it had.
-        merged = newPlist
-        for (key, value) in oldPlist { merged[key] = value }
+    var payload: [String: Any] = ["LCContainers": containers]
+    if let dataUUID = oldPlist["LCDataUUID"] {
+        payload["LCDataUUID"] = dataUUID
     }
-    merged["LCContainers"] = containers
 
-    guard let patched = try? PropertyListSerialization.data(fromPropertyList: merged, format: .xml, options: 0) else {
+    guard let patched = try? PropertyListSerialization.data(fromPropertyList: payload, format: .xml, options: 0) else {
         return false
     }
     do {
@@ -125,12 +137,9 @@ class DownloadManager: NSObject, ObservableObject {
     // Backups kept after a successful update (no prompting, rollback only)
     @Published var retainedBackups: [AppBackup] = []
     
-    /// Keep the previous version of an app after updating it.
-    @Published var keepAppBackups: Bool = true {
-        didSet {
-            UserDefaults.standard.set(keepAppBackups, forKey: "kKeepAppBackups")
-        }
-    }
+    /// Kept for source compatibility with the old update flow; the 2.0 install path always keeps
+    /// the snapshot produced by UpdateBackup, when that switch is on.
+    @Published var keepAppBackups: Bool = true
     
     // Changed to Published for reactive UI updates
     @Published var isAutoUnzipEnabled: Bool {
@@ -138,6 +147,26 @@ class DownloadManager: NSObject, ObservableObject {
             UserDefaults.standard.set(isAutoUnzipEnabled, forKey: "kAutoUnzipEnabled")
         }
     }
+    
+    /// Hand downloaded .ipa files to LiveContainer's own installer instead of unzipping them
+    /// into Applications/ ourselves.
+    ///
+    /// Only LiveContainer can patch a guest app so that dyld accepts it; a bundle that is just
+    /// dropped into Applications/ is never patched and fails on launch with
+    /// "cannot dlopen a main executable". LiveContainer accepts a file URL through
+    /// `livecontainer://install?url=` (same thing its share extension does).
+    @Published var installViaLiveContainer: Bool = true {
+        didSet {
+            UserDefaults.standard.set(installViaLiveContainer, forKey: "kInstallViaLiveContainer")
+        }
+    }
+    
+    /// True while LiveContainer is installing the .ipa we just handed over; the batch queue
+    /// resumes when the user comes back to this app.
+    @Published var isWaitingForExternalInstall: Bool = false
+    
+    /// Path of the .ipa currently parked in LiveContainer; removed once we are back.
+    private var lastHandOffPath: String?
     
     // Keep a copy of the newest downloaded .ipa next to the downloads
     @Published var isAutoArchivingIPAs: Bool = true {
@@ -160,6 +189,12 @@ class DownloadManager: NSObject, ObservableObject {
     private var remoteURLsByLocalPath: [String: String] = [:]
     
     @Published var downloadStates: [URL: DownloadStatus] = [:]
+
+    /// Finished / failed / cancelled downloads, newest first (persisted, capped at 100).
+    @Published var downloadHistory: [DownloadRecord] = []
+
+    /// Total size of the files sitting in the download folder (shown in Settings).
+    @Published var downloadsSizeBytes: Int64 = 0
     
     private var urlSession: URLSession!
     private var tasks: [URL: URLSessionDownloadTask] = [:]
@@ -180,6 +215,7 @@ class DownloadManager: NSObject, ObservableObject {
     
     override init() {
         self.isAutoUnzipEnabled = UserDefaults.standard.bool(forKey: "kAutoUnzipEnabled")
+        self.installViaLiveContainer = UserDefaults.standard.object(forKey: "kInstallViaLiveContainer") as? Bool ?? true
         self.isAutoArchivingIPAs = UserDefaults.standard.object(forKey: "kAutoArchivingIPAs") as? Bool ?? true
         super.init()
         self.keepAppBackups = UserDefaults.standard.object(forKey: "kKeepAppBackups") as? Bool ?? true
@@ -195,6 +231,7 @@ class DownloadManager: NSObject, ObservableObject {
         restoreFolders()
         restoreResumeDataMapping()
         loadPendingBackups()
+        loadDownloadHistory()
         reconnectExistingTasks()
         refreshFileList()
         refreshInstalledApps()
@@ -221,7 +258,18 @@ class DownloadManager: NSObject, ObservableObject {
     
     var currentDownloadFolder: URL {
         if let custom = customDownloadFolder { return custom }
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return DownloadManager.defaultFolder("ipa_downloads")
+    }
+
+    /// <App Documents>/Downloads/<name>, visible in the Files app and created on demand.
+    /// A real "On My iPhone/Downloads" path needs the user to pick it once (security scoped).
+    static func defaultFolder(_ name: String) -> URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = docs
+            .appendingPathComponent("Downloads", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
     
     var currentAppsFolder: URL {
@@ -241,9 +289,8 @@ class DownloadManager: NSObject, ObservableObject {
     }
     
     var backupDirectory: URL {
-        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Backups")
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
+        if let custom = customBackupFolder { return custom }
+        return DownloadManager.defaultFolder("ipa_backups")
     }
     
     // MARK: - IPA Archive
@@ -335,7 +382,7 @@ class DownloadManager: NSObject, ObservableObject {
             isBatchUpdating = false
             batchCurrentName = ""
             batchTotalCount = 0
-            sendNotification(title: "Updates Finished", body: "All queued updates have been processed.", type: .success)
+            sendNotification(title: L10n.t("更新完成", "Updates finished"), body: L10n.t("队列里的更新都处理完了。", "All queued updates have been processed."), type: .success)
             refreshInstalledApps()
             return
         }
@@ -534,9 +581,13 @@ class DownloadManager: NSObject, ObservableObject {
                 try fm.removeItem(at: dest)
             }
             try fm.moveItem(at: backedUpApp, to: dest)
+            // Full snapshots also put the data container back; app-only snapshots skip this.
+            if let dataRoot = currentDataApplicationFolder {
+                UpdateBackup.restoreData(appURL: dest, snapshotFolder: folder, dataRoot: dataRoot)
+            }
             discardRetained(backup)
             refreshInstalledApps()
-            sendNotification(title: "Rolled Back", body: "\(backup.appName) restored to the previous version.", type: .success)
+            sendNotification(title: L10n.t("已回退", "Rolled back"), body: L10n.t("\(backup.appName) 已回到上一个版本。", "\(backup.appName) restored to the previous version."), type: .success)
         } catch {
             print("Restore retained backup failed: \(error)")
         }
@@ -668,9 +719,13 @@ class DownloadManager: NSObject, ObservableObject {
                     }
                 }
                 
-                // Patch new plist with old data to preserve UserData
-                for (key, value) in oldPlist {
-                    newPlist[key] = value
+                // Only carry the data pointer. Copying every old key would also copy the patch
+                // state of the previous binary and make the new one fail to load.
+                if let containers = oldPlist["LCContainers"] {
+                    newPlist["LCContainers"] = containers
+                }
+                if let dataUUID = oldPlist["LCDataUUID"] {
+                    newPlist["LCDataUUID"] = dataUUID
                 }
                 
                 let patchedData = try PropertyListSerialization.data(fromPropertyList: newPlist, format: .xml, options: 0)
@@ -951,6 +1006,59 @@ class DownloadManager: NSObject, ObservableObject {
         tasks[url] = nil
         clearResumeData(for: url)
         downloadStates[url] = nil
+        recordDownload(url: url, fileName: url.lastPathComponent, state: .cancelled, bytes: 0)
+    }
+
+    // MARK: - Download history
+
+    private func loadDownloadHistory() {
+        guard let data = UserDefaults.standard.data(forKey: "kDownloadHistory"),
+              let list = try? JSONDecoder().decode([DownloadRecord].self, from: data) else { return }
+        downloadHistory = list
+    }
+
+    private func saveDownloadHistory() {
+        guard let data = try? JSONEncoder().encode(Array(downloadHistory.prefix(100))) else { return }
+        UserDefaults.standard.set(data, forKey: "kDownloadHistory")
+    }
+
+    func recordDownload(url: URL, fileName: String, state: DownloadRecord.State, bytes: Int64, message: String? = nil) {
+        let record = DownloadRecord(
+            id: url.absoluteString + "#" + UUID().uuidString,
+            url: url.absoluteString,
+            fileName: fileName,
+            state: state,
+            date: Date(),
+            bytes: bytes,
+            message: message
+        )
+        downloadHistory.insert(record, at: 0)
+        saveDownloadHistory()
+    }
+
+    func recalcDownloadsSize() {
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .totalFileAllocatedSizeKey]
+        var total: Int64 = 0
+        if let items = try? FileManager.default.contentsOfDirectory(at: currentDownloadFolder,
+                                                                   includingPropertiesForKeys: Array(keys)) {
+            for item in items where item.pathExtension.lowercased() != "app" {
+                if let values = try? item.resourceValues(forKeys: keys),
+                   let size = values.totalFileAllocatedSize ?? values.fileSize {
+                    total += Int64(size)
+                }
+            }
+        }
+        downloadsSizeBytes = total
+    }
+
+    func removeDownloadRecord(_ record: DownloadRecord) {
+        downloadHistory.removeAll { $0.id == record.id }
+        saveDownloadHistory()
+    }
+
+    func clearDownloadHistory() {
+        downloadHistory.removeAll()
+        saveDownloadHistory()
     }
     
     func isDownloading(url: URL) -> Bool {
@@ -964,6 +1072,7 @@ class DownloadManager: NSObject, ObservableObject {
     }
     
     func refreshFileList() {
+        recalcDownloadsSize()
         do {
             let files = try FileManager.default.contentsOfDirectory(at: currentDownloadFolder, includingPropertiesForKeys: nil)
             let filtered = files.filter { !$0.lastPathComponent.hasPrefix(".") && $0.pathExtension != "app" }
@@ -972,6 +1081,7 @@ class DownloadManager: NSObject, ObservableObject {
     }
     
     func refreshInstalledApps() {
+        cleanupStaleTempDirectories()
         do {
             let files = try FileManager.default.contentsOfDirectory(at: currentAppsFolder, includingPropertiesForKeys: nil)
             var newApps: [LocalApp] = []
@@ -1086,7 +1196,88 @@ class DownloadManager: NSObject, ObservableObject {
         refreshFileList()
     }
     
+    // MARK: - Hand off to LiveContainer
+    
+    /// Folder inside LiveContainer where we park an .ipa before asking it to install.
+    var lcHandoffDirectory: URL? {
+        guard let root = customLiveContainerFolder else { return nil }
+        let dir = root.appendingPathComponent("LCBoxInstall", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    
+    /// Opens LiveContainer's install flow for this .ipa.
+    ///
+    /// LiveContainer can read anything inside its own container, and this app is a guest inside
+    /// it, so the normal download folder needs no copy at all. Only when the user pointed the
+    /// download folder somewhere outside (iCloud, another app) do we park a copy it can read.
+    @discardableResult
+    func handOffToLiveContainer(_ ipa: URL, app: LocalApp? = nil) async -> Bool {
+        guard ipa.pathExtension.lowercased() == "ipa" else { return false }
+
+        // Snapshot the installed build before LiveContainer replaces it, so it can be rolled back.
+        if let app,
+           let snapshot = await UpdateBackup.snapshot(app: app,
+                                                      backupRoot: backupDirectory,
+                                                      dataRoot: currentDataApplicationFolder) {
+            retainBackup(bundlePath: snapshot,
+                         appName: app.name,
+                         bundleID: app.bundleID,
+                         version: app.version,
+                         installPath: app.url.lastPathComponent)
+        }
+        guard let root = customLiveContainerFolder else {
+            sendNotification(title: L10n.t("缺少 LiveContainer 目录", "LiveContainer folder missing"),
+                             body: L10n.t("请先在设置里选择 LiveContainer 目录。", "Choose it in Settings so updates can be installed."),
+                             type: .error)
+            return false
+        }
+
+        let fm = FileManager.default
+        var payload = ipa
+        if !ipa.path.hasPrefix(root.deletingLastPathComponent().path) {
+            guard let dir = lcHandoffDirectory else { return false }
+            let dest = dir.appendingPathComponent(ipa.lastPathComponent)
+            do {
+                if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+                try fm.copyItem(at: ipa, to: dest)
+                payload = dest
+                lastHandOffPath = dest.path
+            } catch {
+                Logger.shared.log("HandOff: copy failed \(error)")
+                sendNotification(title: L10n.t("安装失败", "Install failed"), body: L10n.t("无法准备 \(ipa.lastPathComponent)。", "Could not prepare \(ipa.lastPathComponent)."), type: .error)
+                return false
+            }
+        }
+
+        var components = URLComponents(string: "livecontainer://install")
+        components?.queryItems = [URLQueryItem(name: "url", value: payload.absoluteString)]
+        guard let url = components?.url else { return false }
+        isWaitingForExternalInstall = true
+        Logger.shared.log("HandOff: opening LiveContainer for \(payload.lastPathComponent)")
+        UIApplication.shared.open(url)
+        return true
+    }
+
+    /// Called when the app becomes active again: LiveContainer has finished (or rejected) the
+    /// install, so let a running batch continue with the next app.
+    func resumeAfterExternalInstall() {
+        guard isWaitingForExternalInstall else { return }
+        isWaitingForExternalInstall = false
+        // LiveContainer copied the payload into its own storage; drop our parked copy.
+        if let path = lastHandOffPath {
+            try? FileManager.default.removeItem(atPath: path)
+            lastHandOffPath = nil
+        }
+        refreshInstalledApps()
+        if isBatchUpdating { advanceBatchUpdate() }
+    }
+    
     func convertToApp(file: URL) {
+        if installViaLiveContainer {
+            Task { _ = await handOffToLiveContainer(file) }
+            return
+        }
         Task {
             _ = await MainActor.run { self.extractingFiles.insert(file) }
             
@@ -1231,6 +1422,18 @@ class DownloadManager: NSObject, ObservableObject {
     func finalizeInstallation(action: InstallAction) {
         guard let pending = pendingInstallation else { return }
         
+        // Park the data pointer of the previous install before its bundle moves away.
+        // reconcileDataMigrations() uses it if LiveContainer rebuilds the container.
+        if case .updateExisting = action, let existing = pending.existingApp {
+            let oldInfo = existing.url.appendingPathComponent("LCAppInfo.plist")
+            if FileManager.default.fileExists(atPath: oldInfo.path) {
+                LCDataMigration.shared.remember(plistURL: oldInfo,
+                                                bundleID: existing.bundleID,
+                                                appName: existing.name,
+                                                installPath: existing.url.lastPathComponent)
+            }
+        }
+        
         // A backup recorded by an older build (before data was migrated at install time) still
         // holds the LCAppInfo.plist that points at the real data containers.
         let legacyBackup = pendingBackups.first(where: { $0.bundleID == pending.bundleID })
@@ -1320,8 +1523,8 @@ class DownloadManager: NSObject, ObservableObject {
                             await MainActor.run { self.discardBackup(legacy) }
                         }
                         await MainActor.run {
-                            self.sendNotification(title: "Update Installed",
-                                                  body: "\(existing.name) updated, existing data kept.",
+                            self.sendNotification(title: L10n.t("更新完成", "Update installed"),
+                                                  body: L10n.t("\(existing.name) 已更新，原有数据保留。", "\(existing.name) updated, existing data kept."),
                                                   type: .success)
                         }
                     } else if hadInfo {
@@ -1367,8 +1570,45 @@ class DownloadManager: NSObject, ObservableObject {
                 self.pendingInstallation = nil
                 self.refreshFileList()
                 self.refreshInstalledApps()
+                self.reconcileDataMigrations()
                 self.advanceBatchUpdate()
             }
+        }
+    }
+    
+    /// Extracting an .ipa into the Applications folder goes through Temp_<UUID>/Payload. If the
+    /// install is interrupted (app killed, conflict dialog never answered) that folder survives
+    /// with a full copy of the app inside it. Drop the ones that are clearly abandoned.
+    func cleanupStaleTempDirectories(maxAge: TimeInterval = 600) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: currentAppsFolder,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return }
+        let now = Date()
+        for item in items where item.lastPathComponent.hasPrefix("Temp_") {
+            let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            guard now.timeIntervalSince(modified) > maxAge else { continue }
+            try? fm.removeItem(at: item)
+            Logger.shared.log("Cleanup: removed stale temp directory \(item.lastPathComponent)")
+        }
+    }
+    
+    /// Called on foreground and right after an install: if LiveContainer has already (re)created
+    /// the container of an app we updated, move the previous data into it.
+    func reconcileDataMigrations() {
+        guard let dataRoot = currentDataApplicationFolder else { return }
+        let appsFolder = currentAppsFolder
+        Task {
+            let restored = await LCDataMigration.shared.reconcile(appsFolder: appsFolder, dataRoot: dataRoot)
+            guard !restored.isEmpty else { return }
+            for name in restored {
+                sendNotification(title: L10n.t("数据已恢复", "Data restored"),
+                                 body: L10n.t("\(name)：已把原有数据合并回来。", "\(name): existing data was carried over."),
+                                 type: .success)
+            }
+            refreshInstalledApps()
         }
     }
     
@@ -1407,12 +1647,21 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 let finalURL = folder.appendingPathComponent(finalName)
                 if manager.fileExists(atPath: finalURL.path) { try manager.removeItem(at: finalURL) }
                 try manager.moveItem(at: stagingURL, to: finalURL)
+                let attributes = try? manager.attributesOfItem(atPath: finalURL.path)
+                let finishedSize = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+                self.recordDownload(url: sourceURL, fileName: finalName, state: .finished, bytes: finishedSize)
                 // Remember where this file really came from; provenance/GitHub binding relies on it.
                 self.remoteURLsByLocalPath[finalURL.path] = sourceURL.absoluteString
                 
-                self.sendNotification(title: "Download Complete", body: "\(finalName) has been downloaded.", type: .success)
+                self.sendNotification(title: L10n.t("下载完成", "Download complete"), body: L10n.t("\(finalName) 已下载。", "\(finalName) has been downloaded."), type: .success)
                 
-                if (self.isAutoUnzipEnabled || self.isBatchUpdating) && finalURL.pathExtension.lowercased() == "ipa" {
+                if self.installViaLiveContainer && finalURL.pathExtension.lowercased() == "ipa" {
+                    // LiveContainer installs and patches it; the batch resumes when we are back.
+                    let handedOff = await self.handOffToLiveContainer(finalURL)
+                    if !handedOff {
+                        self.advanceBatchUpdate()
+                    }
+                } else if (self.isAutoUnzipEnabled || self.isBatchUpdating) && finalURL.pathExtension.lowercased() == "ipa" {
                     self.extractingFiles.insert(finalURL)
                     try await self.extractApp(from: finalURL)
                     if self.pendingInstallation == nil {
@@ -1436,7 +1685,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 }
                 // Never leave a batch run stuck on a single failure.
                 if self.isBatchUpdating {
-                    self.sendNotification(title: "Update Failed", body: "Skipping \(self.batchCurrentName).", type: .error)
+                    self.sendNotification(title: L10n.t("更新失败", "Update failed"), body: L10n.t("跳过 \(self.batchCurrentName)。", "Skipping \(self.batchCurrentName)."), type: .error)
                     self.advanceBatchUpdate()
                 }
             }
@@ -1473,8 +1722,13 @@ extension DownloadManager: URLSessionDownloadDelegate {
             } else {
                 Task { @MainActor in
                     self.downloadStates[sourceURL] = nil
+                    self.recordDownload(url: sourceURL,
+                                        fileName: sourceURL.lastPathComponent,
+                                        state: .failed,
+                                        bytes: 0,
+                                        message: error.localizedDescription)
                     if self.isBatchUpdating {
-                        self.sendNotification(title: "Update Failed", body: "Skipping \(self.batchCurrentName).", type: .error)
+                        self.sendNotification(title: L10n.t("更新失败", "Update failed"), body: L10n.t("跳过 \(self.batchCurrentName)。", "Skipping \(self.batchCurrentName)."), type: .error)
                         self.advanceBatchUpdate()
                     }
                 }
