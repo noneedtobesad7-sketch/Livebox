@@ -1255,7 +1255,7 @@ class DownloadManager: NSObject, ObservableObject {
         guard let url = components?.url else { return false }
         isWaitingForExternalInstall = true
         Logger.shared.log("HandOff: opening LiveContainer for \(payload.lastPathComponent)")
-        UIApplication.shared.open(url)
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
         return true
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Two-word bilingual helper.
 ///
@@ -202,7 +203,7 @@ struct InstalledAppsView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if filter == .all {
                         Menu {
-                            Picker(Text(L10n.t("排序", "Sort By")), selection: $sortRaw) {
+                            Picker((L10n.t("排序", "Sort By")), selection: $sortRaw) {
                                 Text(L10n.t("名称", "Name")).tag("name")
                                 Text(L10n.t("名称（倒序）", "Name (Z-A)")).tag("nameReverse")
                                 Text(L10n.t("版本", "Version")).tag("version")
@@ -212,12 +213,12 @@ struct InstalledAppsView: View {
                             Image(systemName: "arrow.up.arrow.down")
                         }
                     } else if filter == .unbound {
-                        Button(Text(L10n.t("检查来源", "Check Sources"))) {
+                        Button((L10n.t("检查来源", "Check Sources"))) {
                             Task { await scanSources() }
                         }
                         .disabled(isScanning)
                     } else {
-                        Button(Text(L10n.t("检查更新", "Check Updates"))) {
+                        Button((L10n.t("检查更新", "Check Updates"))) {
                             Task { await checkUpdates() }
                         }
                         .disabled(isScanning)
@@ -226,14 +227,14 @@ struct InstalledAppsView: View {
             }
             .alert(Text(L10n.t("打开 LiveContainer 完成更新", "Open LiveContainer to finish updating")),
                    isPresented: installAlertBinding) {
-                Button(Text(L10n.t("打开 LiveContainer", "Open LiveContainer"))) {
+                Button((L10n.t("打开 LiveContainer", "Open LiveContainer"))) {
                     let request = pendingInstall
                     pendingInstall = nil
                     if let request {
                         Task { _ = await downloadManager.handOffToLiveContainer(request.file, app: request.app) }
                     }
                 }
-                Button(Text(L10n.t("取消", "Cancel")), role: .cancel) {
+                Button((L10n.t("取消", "Cancel")), role: .cancel) {
                     pendingInstall = nil
                 }
             } message: {
@@ -301,7 +302,7 @@ struct InstalledAppsView: View {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
-                TextField(Text(L10n.t("搜索应用", "Search apps")), text: $searchText)
+                TextField((L10n.t("搜索应用", "Search apps")), text: $searchText)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 if !searchText.isEmpty {
@@ -491,7 +492,7 @@ struct InstalledAppRow: View {
     @ViewBuilder private var trailing: some View {
         if filter == .unbound {
             if candidate != nil {
-                Button(Text(L10n.t("绑定", "Bind"))) { onBind(app) }
+                Button((L10n.t("绑定", "Bind"))) { onBind(app) }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
             }
@@ -501,18 +502,18 @@ struct InstalledAppRow: View {
                 case .downloading(let progress, _, _):
                     ProgressView(value: progress).frame(width: 56)
                 case .paused, .waitingForConnection:
-                    Button(Text(L10n.t("继续", "Continue"))) { downloadManager.resumeDownload(url: url) }
+                    Button((L10n.t("继续", "Continue"))) { downloadManager.resumeDownload(url: url) }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                 case .none:
                     EmptyView()
                 }
             } else if let local = downloadManager.getLocalFile(for: url) {
-                Button(Text(L10n.t("安装", "Install"))) { onInstall(local) }
+                Button((L10n.t("安装", "Install"))) { onInstall(local) }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
             } else {
-                Button(Text(L10n.t("下载", "Download"))) { onDownload(url) }
+                Button((L10n.t("下载", "Download"))) { onDownload(url) }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
             }

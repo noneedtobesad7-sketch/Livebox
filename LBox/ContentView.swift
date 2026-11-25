@@ -27,7 +27,7 @@ struct ContentView: View {
     @State private var lastAutoUpdateCheck: Date = .distantPast
     
     var body: some View {
-        ZStack {
+        let content = ZStack {
             mainTabView
                 .environmentObject(downloadManager)
             
@@ -45,28 +45,10 @@ struct ContentView: View {
             
             // Watch pendingInstallation to trigger local alert state
             .onChange(of: downloadManager.pendingInstallation?.id) { newID in
-                if newID != nil {
-                    if downloadManager.acceptPendingAutomatically() {
-                        return
-                    }
-                    showConflictAlert = true
-                } else {
-                    showConflictAlert = false
-                    // Conflict resolution finished (or cancelled). 
-                    // Check if we have an incomplete update (backup exists, app config missing).
-                    // We add a small delay to ensure the previous alert effectively dismissed in the UI system
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        if downloadManager.isBatchUpdating { return }
-                        if let backup = downloadManager.pendingBackups.last {
-                            // If checkUpdateStatus returns false, it means the app is installed but lacks config (needs run).
-                            if !downloadManager.checkUpdateStatus(for: backup) {
-                                verificationBackup = backup
-                            }
-                        }
-                    }
-                }
+                handlePendingInstallation(newID)
             }
-            
+        
+        return content
             // MARK: - Alerts
             .alert("Complete Update", isPresented: updateAlertBinding, presenting: verificationBackup) { backup in
                 Button("Open LiveContainer") {
@@ -90,12 +72,12 @@ struct ContentView: View {
                 Text("To enable auto-installation and launching, please select your LiveContainer storage directory.")
             }
             .alert(Text(L10n.t("设置下载目录", "Choose a download folder")), isPresented: $showDownloadSetupAlert) {
-                Button(Text(L10n.t("选择文件夹", "Select Folder"))) {
+                Button((L10n.t("选择文件夹", "Select Folder"))) {
                     hasAskedDownloadFolder = true
                     pickingDownloadFolder = true
                     showSetupPicker = true
                 }
-                Button(Text(L10n.t("稍后", "Later")), role: .cancel) {
+                Button((L10n.t("稍后", "Later")), role: .cancel) {
                     hasAskedDownloadFolder = true
                 }
             } message: {
@@ -173,6 +155,24 @@ struct ContentView: View {
         Binding(get: { verificationBackup != nil }, set: { if !$0 { verificationBackup = nil } })
     }
     // Removed conflictAlertBinding computed property in favor of local @State
+    
+    /// Reacts to a new/cleared pending installation instead of doing it inline in `body`,
+    /// which made the whole modifier chain too expensive to type-check.
+    func handlePendingInstallation(_ newID: UUID?) {
+        guard newID != nil else {
+            showConflictAlert = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if downloadManager.isBatchUpdating { return }
+                if let backup = downloadManager.pendingBackups.last,
+                   !downloadManager.checkUpdateStatus(for: backup) {
+                    verificationBackup = backup
+                }
+            }
+            return
+        }
+        if downloadManager.acceptPendingAutomatically() { return }
+        showConflictAlert = true
+    }
     
     func performInitialSetup() async {
         if viewModel.displayApps.isEmpty && SourceRefresh.shouldRefresh() {
@@ -857,9 +857,9 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
                 Section("App Backups") {
-                    Toggle(Text(L10n.t("更新前备份当前版本", "Back up the installed build before updating")),
+                    Toggle((L10n.t("更新前备份当前版本", "Back up the installed build before updating")),
                            isOn: $backupAppBeforeUpdate)
-                    Toggle(Text(L10n.t("完整快照（含数据）", "Full snapshot (includes app data)")),
+                    Toggle((L10n.t("完整快照（含数据）", "Full snapshot (includes app data)")),
                            isOn: $backupFullSnapshot)
                         .disabled(!backupAppBeforeUpdate)
                     Text(L10n.t("只在点「安装」把包交给 LiveContainer 之前备份。只备份程序时，回退后看到的仍是当前数据；打开完整快照才会把数据容器一起还原。回退入口：长按应用。",
