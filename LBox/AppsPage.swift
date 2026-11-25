@@ -251,7 +251,7 @@ struct InstalledAppsView: View {
                     pendingInstall = nil
                     if let request { downloadManager.extractWithoutLiveContainer(file: request.file) }
                 }
-                Button(Text(L10n.t("取消", "Cancel")), role: .cancel) {
+                Button((L10n.t("取消", "Cancel")), role: .cancel) {
                     pendingInstall = nil
                 }
             } message: {
