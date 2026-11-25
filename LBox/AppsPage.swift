@@ -111,6 +111,7 @@ struct InstalledAppsView: View {
     @State private var showAllSources = false
     @State private var bindTarget: LocalApp? = nil
     @State private var pendingInstall: PendingInstall? = nil
+    @State private var shareURL: URL? = nil
     @State private var isScanning = false
     @AppStorage("kInstalledSort") private var sortRaw: String = "name"
 
@@ -196,7 +197,7 @@ struct InstalledAppsView: View {
                     Button {
                         openLiveContainer()
                     } label: {
-                        Image(systemName: "square.stack.3d.up")
+                        LiveContainerPill()
                     }
                     .accessibilityLabel(Text(L10n.t("打开 LiveContainer", "Open LiveContainer")))
                 }
@@ -227,19 +228,27 @@ struct InstalledAppsView: View {
             }
             .alert(Text(L10n.t("打开 LiveContainer 完成更新", "Open LiveContainer to finish updating")),
                    isPresented: installAlertBinding) {
-                Button((L10n.t("打开 LiveContainer", "Open LiveContainer"))) {
+                Button((L10n.t("继续", "Continue"))) {
                     let request = pendingInstall
                     pendingInstall = nil
                     if let request {
-                        Task { _ = await downloadManager.handOffToLiveContainer(request.file, app: request.app) }
+                        // LiveContainer installs through its share extension: hand it the file
+                        // with the system share sheet (the URL scheme is not supported).
+                        shareURL = request.file
                     }
                 }
                 Button((L10n.t("取消", "Cancel")), role: .cancel) {
                     pendingInstall = nil
                 }
             } message: {
-                Text(L10n.t("LiveContainer 会接着完成安装；装好后切回这里可以继续下一个。",
-                            "LiveContainer will finish the install. Switch back here for the next one."))
+                Text(L10n.t("下一步在分享面板里选择 LiveContainer，由它打补丁并完成安装；装好后切回这里可以继续下一个。",
+                            "Pick LiveContainer in the share sheet so it can patch and install the app. Come back here for the next one."))
+            }
+            .sheet(isPresented: Binding(get: { shareURL != nil },
+                                        set: { if !$0 { shareURL = nil; downloadManager.markWaitingForExternalInstall() } })) {
+                if let url = shareURL {
+                    ShareSheet(activityItems: [url])
+                }
             }
             .sheet(isPresented: $showAllSources) {
                 SourceConfirmationSheet(bundleIDFilter: nil)
@@ -443,8 +452,15 @@ struct InstalledAppsView: View {
     }
 
     private func openLiveContainer() {
-        if let url = URL(string: "livecontainer://") {
-            UIApplication.shared.open(url)
+        // LiveContainer has no "home" route, so this is best effort: if iOS cannot hand the
+        // URL over, tell the user how to get there instead of doing nothing.
+        guard let url = URL(string: "livecontainer://") else { return }
+        UIApplication.shared.open(url, options: [:]) { opened in
+            guard !opened else { return }
+            NotificationManager.shared.show(
+                title: L10n.t("无法切换到 LiveContainer", "Cannot switch to LiveContainer"),
+                message: L10n.t("请从后台多任务里切过去。", "Switch to it from the app switcher."),
+                type: .info)
         }
     }
 }
@@ -521,5 +537,31 @@ struct InstalledAppRow: View {
                     .controlSize(.small)
             }
         }
+    }
+}
+
+/// The little "switch to LiveContainer" pill: a plus and the gradient app tile, mirroring the
+/// LiveContainer quick action.
+struct LiveContainerPill: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "plus")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.white)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(LinearGradient(colors: [Color(red: 0.16, green: 0.72, blue: 0.98),
+                                              Color(red: 0.72, green: 0.24, blue: 0.95)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 24, height: 24)
+                .overlay(
+                    Image(systemName: "arrow.up.forward")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.white)
+                )
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(Color.black.opacity(0.82)))
+        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.5))
     }
 }

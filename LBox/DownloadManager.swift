@@ -1259,16 +1259,17 @@ class DownloadManager: NSObject, ObservableObject {
         return true
     }
 
+    /// Marks that the install hand-off is in flight, so coming back refreshes the app list.
+    func markWaitingForExternalInstall() {
+        isWaitingForExternalInstall = true
+    }
+
     /// Called when the app becomes active again: LiveContainer has finished (or rejected) the
     /// install, so let a running batch continue with the next app.
     func resumeAfterExternalInstall() {
         guard isWaitingForExternalInstall else { return }
         isWaitingForExternalInstall = false
-        // LiveContainer copied the payload into its own storage; drop our parked copy.
-        if let path = lastHandOffPath {
-            try? FileManager.default.removeItem(atPath: path)
-            lastHandOffPath = nil
-        }
+        // The .ipa is kept: if the install was cancelled the user can try again from the list.
         refreshInstalledApps()
         if isBatchUpdating { advanceBatchUpdate() }
     }
@@ -1655,12 +1656,9 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 
                 self.sendNotification(title: L10n.t("下载完成", "Download complete"), body: L10n.t("\(finalName) 已下载。", "\(finalName) has been downloaded."), type: .success)
                 
-                if self.installViaLiveContainer && finalURL.pathExtension.lowercased() == "ipa" {
-                    // LiveContainer installs and patches it; the batch resumes when we are back.
-                    let handedOff = await self.handOffToLiveContainer(finalURL)
-                    if !handedOff {
-                        self.advanceBatchUpdate()
-                    }
+                if self.isBatchUpdating && finalURL.pathExtension.lowercased() == "ipa" {
+                    // Downloads only: installing is an explicit action in the Apps list.
+                    self.advanceBatchUpdate()
                 } else if (self.isAutoUnzipEnabled || self.isBatchUpdating) && finalURL.pathExtension.lowercased() == "ipa" {
                     self.extractingFiles.insert(finalURL)
                     try await self.extractApp(from: finalURL)

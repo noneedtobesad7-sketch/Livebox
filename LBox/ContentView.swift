@@ -487,6 +487,7 @@ struct DirectDownloadView: View {
     @State private var renamingFile: URL?
     @State private var newFileName = ""
     @State private var showFileImporter = false
+    @State private var installURL: URL?
     var body: some View {
         NavigationStack {
             List {
@@ -532,6 +533,8 @@ struct DirectDownloadView: View {
                         FileRow(localURL: file, onRename: {
                             renamingFile = file
                             newFileName = file.lastPathComponent
+                        }, onInstall: { url in
+                            installURL = url
                         })
                     }
                     .onDelete { idx in idx.forEach { downloadManager.deleteFile(downloadManager.fileList[$0]) } }
@@ -561,6 +564,12 @@ struct DirectDownloadView: View {
                 }
             }
             .refreshable { downloadManager.refreshFileList() }
+            .sheet(isPresented: Binding(get: { installURL != nil },
+                                        set: { if !$0 { installURL = nil } })) {
+                if let url = installURL {
+                    ShareSheet(activityItems: [url])
+                }
+            }
             .alert("Rename File", isPresented: Binding(get: { renamingFile != nil }, set: { if !$0 { renamingFile = nil } })) {
                 TextField("Filename.ipa", text: $newFileName)
                 Button("Cancel", role: .cancel) { renamingFile = nil }
@@ -702,6 +711,7 @@ struct FileRow: View {
     @State private var showShare = false
     @State private var tempURL: URL?
     var onRename: (() -> Void)? = nil
+    var onInstall: ((URL) -> Void)? = nil
     var isExtracting: Bool { manager.extractingFiles.contains(localURL) }
     var body: some View {
         HStack {
@@ -726,8 +736,10 @@ struct FileRow: View {
                 Button { onRename() } label: { Label("Rename", systemImage: "pencil") }
             }
             Button(role: .destructive) { manager.deleteFile(localURL) } label: { Label("Delete", systemImage: "trash") }
-            if isArchive {
-                Button { manager.convertToApp(file: localURL) } label: { Label("Convert to .app", systemImage: "cube") }
+            if isArchive, let onInstall {
+                Button { onInstall(localURL) } label: {
+                    Label(L10n.t("用 LiveContainer 安装", "Install with LiveContainer"), systemImage: "square.and.arrow.up")
+                }
             }
             Button {
                 tempURL = prepareShare(localURL); showShare = true
@@ -918,7 +930,6 @@ struct SettingsView: View {
                     Text(dm.backupFolderDisplayName)
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Toggle("Auto .ipa to .app", isOn: $dm.isAutoUnzipEnabled)
                     Toggle(L10n.t("用 LiveContainer 安装", "Install via LiveContainer"), isOn: $dm.installViaLiveContainer)
                     Text("Recommended. Hand the .ipa to LiveContainer so it can patch the app and keep its data; a bundle copied into Applications/ by hand can't be launched.")
                         .font(.caption).foregroundColor(.secondary)
@@ -1066,9 +1077,10 @@ struct SettingsView: View {
                     Link(destination: URL(string: "https://github.com/noneedtobesad7-sketch/Livebox")!) {
                         Text("Livebox \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")")
                     }
-                    Text("Based on LBox by Lolendor (MIT)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    Link(destination: URL(string: "https://github.com/Lolendor/LBox")!) {
+                        Text("Based on LBox by Lolendor (MIT)")
+                            .font(.caption)
+                    }
                     #if DEBUG
                     NavigationLink("Debug Logs") { DebugLogView() }
                     #endif
