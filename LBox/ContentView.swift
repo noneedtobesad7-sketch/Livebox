@@ -777,6 +777,12 @@ struct SettingsView: View {
     @State private var showBindingImport = false
     @State private var showBindingsExported = false
     /// Kept out of the view body: an inline ternary there pushes the type-checker over its limit.
+    /// One line summary for the backup section (interpolating a formatter call inside a
+    /// LocalizedStringKey is what made the type-checker give up here).
+    static func keptSummary(_ count: Int, _ bytes: Int64) -> String {
+        "\(count) · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))"
+    }
+
     static func repoSortLabel(_ option: RepoSortOption) -> String {
         option == .name ? L10n.t("名称", "Name") : L10n.t("默认", "Default")
     }
@@ -784,6 +790,70 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
+                appearanceSection
+                directoriesSection
+                storeSection
+                updatesSection
+                appBackupsSection
+                githubSourcesSection
+                repositoriesSection
+                backupRestoreSection
+                aboutSection
+            }
+            .navigationTitle("Settings")
+            .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: [.folder]) { res in 
+                if case .success(let url) = res { 
+                    if pickingBackupFolder {
+                        dm.setBackupFolder(url)
+                        pickingBackupFolder = false
+                    } else if isPickingLiveContainer {
+                        dm.setCustomFolder(url, forApps: true) 
+                        didSelectLiveContainer = true 
+                    } else {
+                        dm.setCustomFolder(url, forApps: false)
+                    }
+                } else {
+                    pickingBackupFolder = false
+                }
+            }
+            .onChange(of: showFolderImporter) { isPresented in 
+                // Only run Help logic if we were picking for LiveContainer
+                if isPickingLiveContainer {
+                    if !isPresented { 
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { 
+                            if !didSelectLiveContainer { showSettingsHelp = true } 
+                        } 
+                    } else { 
+                        didSelectLiveContainer = false 
+                    } 
+                }
+            }
+            .alert("Reset?", isPresented: $confirmReset) { Button("Cancel", role: .cancel) {}; Button("Reset", role: .destructive) { viewModel.resetReposToDefault() } }
+            
+            // Corrected Confirmation Dialog for SettingsView
+            .confirmationDialog("Copy Options", isPresented: $showCopyAlert) { 
+                Button("Copy All") { 
+                    if let s = viewModel.exportReposJSON(onlyEnabled: false) { UIPasteboard.general.string = s } 
+                }
+                Button("Only Enabled") { 
+                    if let s = viewModel.exportReposJSON(onlyEnabled: true) { UIPasteboard.general.string = s } 
+                }
+                Button("Cancel", role: .cancel) { } 
+            } message: { Text("Some repositories are disabled. Which would you like to copy?") }
+            
+            .sheet(isPresented: $showExporter) { ShareSheet(activityItems: [exportJSONString]) }
+            .sheet(isPresented: $showImporter) { ImportJSONView(viewModel: viewModel) }
+            .sheet(isPresented: $showBindingImport) { BindingImportSheet(center: github) }
+            .alert("Bindings copied", isPresented: $showBindingsExported) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("The bindings JSON is on the clipboard. Keep it somewhere safe, then paste it into Import Bindings after installing the new build.")
+            }
+            .alert("Have trouble selecting?", isPresented: $showSettingsHelp) { Button("Open LiveContainer") { if let url = URL(string: "livecontainer://install") { UIApplication.shared.open(url) } }; Button("Cancel", role: .cancel) { } } message: { Text("Solution: Open LiveContainer, find LBox in the \"My Apps\" list, press and hold the icon, tap Settings, and enable Fix File Picker. Then try selecting the directory again.") }
+        }
+    }
+
+    @ViewBuilder private var appearanceSection: some View {
                 Section("Appearance") {
                     Picker("Language", selection: $appLanguage) {
                         Text("Follow System").tag("system")
@@ -796,6 +866,9 @@ struct SettingsView: View {
                         Text("Dark").tag("dark")
                     }
                 }
+    }
+
+    @ViewBuilder private var directoriesSection: some View {
                 Section("Directories") {
                     HStack { 
                         Text("Downloads")
@@ -850,6 +923,9 @@ struct SettingsView: View {
                     Text("Recommended. Hand the .ipa to LiveContainer so it can patch the app and keep its data; a bundle copied into Applications/ by hand can't be launched.")
                         .font(.caption).foregroundColor(.secondary)
                 }
+    }
+
+    @ViewBuilder private var storeSection: some View {
                 Section("Store") {
                    Toggle("Strict Grouping", isOn: $viewModel.strictGrouping)
                    if viewModel.strictGrouping {
@@ -858,6 +934,9 @@ struct SettingsView: View {
                        Text("Apps with the same Bundle ID will be grouped together regardless of source.").font(.caption).foregroundColor(.secondary)
                    }
                 }
+    }
+
+    @ViewBuilder private var updatesSection: some View {
                 Section("Updates") {
                     Toggle("Check Updates Automatically", isOn: $autoCheckUpdates)
                     Toggle("Include Pre-releases", isOn: $includePrereleases)
@@ -866,6 +945,9 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+    }
+
+    @ViewBuilder private var appBackupsSection: some View {
                 Section("App Backups") {
                     Toggle((L10n.t("更新前备份当前版本", "Back up the installed build before updating")),
                            isOn: $backupAppBeforeUpdate)
@@ -879,7 +961,7 @@ struct SettingsView: View {
                     HStack {
                         Text("Kept")
                         Spacer()
-                        Text("\(dm.retainedBackups.count) · \(ByteCountFormatter.string(fromByteCount: dm.retainedBackupsSizeBytes, countStyle: .file))")
+                        Text(SettingsView.keptSummary(dm.retainedBackups.count, dm.retainedBackupsSizeBytes))
                             .foregroundColor(.secondary)
                     }
                     if !dm.retainedBackups.isEmpty {
@@ -890,6 +972,9 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+    }
+
+    @ViewBuilder private var githubSourcesSection: some View {
                 Section("GitHub Sources") {
                     HStack {
                         Text("Tracked")
@@ -937,6 +1022,9 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+    }
+
+    @ViewBuilder private var repositoriesSection: some View {
                 Section("Repositories") {
                     NavigationLink("Manage Sources") { RepoManagementView(viewModel: viewModel, parentID: nil) }
                     Picker("Sort Repos By", selection: $viewModel.repoSortOrder) {
@@ -954,6 +1042,9 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+    }
+
+    @ViewBuilder private var backupRestoreSection: some View {
                 Section("Backup/Restore") {
                     Menu("Export Repos...") {
                         Button("Copy as JSON") {
@@ -968,6 +1059,9 @@ struct SettingsView: View {
                     }
                     Button("Import Repos (JSON)") { showImporter = true }
                 }
+    }
+
+    @ViewBuilder private var aboutSection: some View {
                 Section("About") {
                     Link(destination: URL(string: "https://github.com/noneedtobesad7-sketch/Livebox")!) {
                         Text("Livebox \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")")
@@ -980,59 +1074,8 @@ struct SettingsView: View {
                     #endif
                     Button("Reset to Defaults") { confirmReset = true }.foregroundColor(.red)
                 }
-            }
-            .navigationTitle("Settings")
-            .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: [.folder]) { res in 
-                if case .success(let url) = res { 
-                    if pickingBackupFolder {
-                        dm.setBackupFolder(url)
-                        pickingBackupFolder = false
-                    } else if isPickingLiveContainer {
-                        dm.setCustomFolder(url, forApps: true) 
-                        didSelectLiveContainer = true 
-                    } else {
-                        dm.setCustomFolder(url, forApps: false)
-                    }
-                } else {
-                    pickingBackupFolder = false
-                }
-            }
-            .onChange(of: showFolderImporter) { isPresented in 
-                // Only run Help logic if we were picking for LiveContainer
-                if isPickingLiveContainer {
-                    if !isPresented { 
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { 
-                            if !didSelectLiveContainer { showSettingsHelp = true } 
-                        } 
-                    } else { 
-                        didSelectLiveContainer = false 
-                    } 
-                }
-            }
-            .alert("Reset?", isPresented: $confirmReset) { Button("Cancel", role: .cancel) {}; Button("Reset", role: .destructive) { viewModel.resetReposToDefault() } }
-            
-            // Corrected Confirmation Dialog for SettingsView
-            .confirmationDialog("Copy Options", isPresented: $showCopyAlert) { 
-                Button("Copy All") { 
-                    if let s = viewModel.exportReposJSON(onlyEnabled: false) { UIPasteboard.general.string = s } 
-                }
-                Button("Only Enabled") { 
-                    if let s = viewModel.exportReposJSON(onlyEnabled: true) { UIPasteboard.general.string = s } 
-                }
-                Button("Cancel", role: .cancel) { } 
-            } message: { Text("Some repositories are disabled. Which would you like to copy?") }
-            
-            .sheet(isPresented: $showExporter) { ShareSheet(activityItems: [exportJSONString]) }
-            .sheet(isPresented: $showImporter) { ImportJSONView(viewModel: viewModel) }
-            .sheet(isPresented: $showBindingImport) { BindingImportSheet(center: github) }
-            .alert("Bindings copied", isPresented: $showBindingsExported) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text("The bindings JSON is on the clipboard. Keep it somewhere safe, then paste it into Import Bindings after installing the new build.")
-            }
-            .alert("Have trouble selecting?", isPresented: $showSettingsHelp) { Button("Open LiveContainer") { if let url = URL(string: "livecontainer://install") { UIApplication.shared.open(url) } }; Button("Cancel", role: .cancel) { } } message: { Text("Solution: Open LiveContainer, find LBox in the \"My Apps\" list, press and hold the icon, tap Settings, and enable Fix File Picker. Then try selecting the directory again.") }
-        }
     }
+
 }
 
 // [RepoManagementView and helpers preserved]
