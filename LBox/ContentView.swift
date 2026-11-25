@@ -250,6 +250,11 @@ struct ContentView: View {
 
 // MARK: - Store View
 struct StoreView: View {
+    /// The built-in folder is stored as "Recommended"; show it localized.
+    static func repoName(_ name: String) -> String {
+        name == "Recommended" ? L10n.t("推荐", "Recommended") : name
+    }
+
     /// Store sort menu labels (the enum raw values are English UI text).
     static func sortLabel(_ option: AppSortOption) -> String {
         switch option {
@@ -285,7 +290,7 @@ struct StoreView: View {
                     Picker("Source", selection: $viewModel.selectedRepoID) {
                         Text("All Sources").tag(String?.none)
                         ForEach(viewModel.getEnabledLeafRepos()) { repo in
-                            Text(repo.name == "Recommended" ? L10n.t("推荐", "Recommended") : repo.name).tag(repo.name as String?)
+                            Text(StoreView.repoName(repo.name)).tag(repo.name as String?)
                         }
                     }
                     .pickerStyle(.menu).listRowBackground(Color.clear).padding(.bottom, 5)
@@ -771,6 +776,11 @@ struct SettingsView: View {
     @State private var pickingBackupFolder = false
     @State private var showBindingImport = false
     @State private var showBindingsExported = false
+    /// Kept out of the view body: an inline ternary there pushes the type-checker over its limit.
+    static func repoSortLabel(_ option: RepoSortOption) -> String {
+        option == .name ? L10n.t("名称", "Name") : L10n.t("默认", "Default")
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -931,7 +941,7 @@ struct SettingsView: View {
                     NavigationLink("Manage Sources") { RepoManagementView(viewModel: viewModel, parentID: nil) }
                     Picker("Sort Repos By", selection: $viewModel.repoSortOrder) {
                         ForEach(RepoSortOption.allCases) { option in
-                            Text(option == .name ? L10n.t("名称", "Name") : L10n.t("默认", "Default")).tag(option)
+                            Text(SettingsView.repoSortLabel(option)).tag(option)
                         }
                     }
                     Picker(Text(L10n.t("源更新频率", "Refresh Sources")), selection: $sourceRefreshDays) {

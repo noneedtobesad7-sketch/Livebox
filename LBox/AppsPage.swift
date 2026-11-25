@@ -323,9 +323,7 @@ struct InstalledAppsView: View {
                 Button {
                     primaryAction()
                 } label: {
-                    Text(filter == .bound
-                         ? L10n.t("全部更新", "Update All")
-                         : L10n.t("全部绑定", "Bind All"))
+                    Text(primaryActionTitle)
                         .font(.footnote.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
@@ -387,6 +385,11 @@ struct InstalledAppsView: View {
     }
 
     // MARK: - Actions
+
+    /// Bound -> bulk download, unbound -> bind everything.
+    private var primaryActionTitle: String {
+        filter == .bound ? L10n.t("全部更新", "Update All") : L10n.t("全部绑定", "Bind All")
+    }
 
     private func primaryAction() {
         switch filter {
