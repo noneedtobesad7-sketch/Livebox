@@ -112,6 +112,7 @@ struct InstalledAppsView: View {
     @State private var bindTarget: LocalApp? = nil
     @State private var pendingInstall: PendingInstall? = nil
     @State private var shareURL: URL? = nil
+    @State private var showSwitcher = false
     @State private var isScanning = false
     @AppStorage("kInstalledSort") private var sortRaw: String = "name"
 
@@ -194,12 +195,23 @@ struct InstalledAppsView: View {
             .navigationTitle(Text(L10n.t("我的 app", "My Apps")))
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        openLiveContainer()
+                    Menu {
+                        Button {
+                            openLiveContainer()
+                        } label: {
+                            Label(L10n.t("回到 LiveContainer", "Back to LiveContainer"),
+                                  systemImage: "square.stack.3d.up")
+                        }
+                        Button {
+                            showSwitcher = true
+                        } label: {
+                            Label(L10n.t("切换到其他 App…", "Switch to another app…"),
+                                  systemImage: "arrow.left.arrow.right")
+                        }
                     } label: {
                         LiveContainerPill()
                     }
-                    .accessibilityLabel(Text(L10n.t("打开 LiveContainer", "Open LiveContainer")))
+                    .accessibilityLabel(Text(L10n.t("切换 LiveContainer / 其他 App", "Switch app")))
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if filter == .all {
@@ -243,6 +255,9 @@ struct InstalledAppsView: View {
             } message: {
                 Text(L10n.t("下一步在分享面板里选择 LiveContainer，由它打补丁并完成安装；装好后切回这里可以继续下一个。",
                             "Pick LiveContainer in the share sheet so it can patch and install the app. Come back here for the next one."))
+            }
+            .sheet(isPresented: $showSwitcher) {
+                AppSwitcherSheet(apps: downloadManager.installedApps)
             }
             .sheet(isPresented: Binding(get: { shareURL != nil },
                                         set: { if !$0 { shareURL = nil; downloadManager.markWaitingForExternalInstall() } })) {
@@ -451,16 +466,23 @@ struct InstalledAppsView: View {
         }
     }
 
+    /// Guest apps run inside LiveContainer's own process, so there is no separate "home" to
+    /// switch to: the launch route (same one the app icons use) is the only reliable entry.
     private func openLiveContainer() {
-        // LiveContainer has no "home" route, so this is best effort: if iOS cannot hand the
-        // URL over, tell the user how to get there instead of doing nothing.
-        guard let url = URL(string: "livecontainer://") else { return }
-        UIApplication.shared.open(url, options: [:]) { opened in
-            guard !opened else { return }
+        let candidates = ["livecontainer://livecontainer-launch", "livecontainer://"]
+        openFirst(candidates.map { URL(string: $0) }.compactMap { $0 })
+    }
+
+    private func openFirst(_ urls: [URL]) {
+        guard let url = urls.first else {
             NotificationManager.shared.show(
                 title: L10n.t("无法切换到 LiveContainer", "Cannot switch to LiveContainer"),
                 message: L10n.t("请从后台多任务里切过去。", "Switch to it from the app switcher."),
                 type: .info)
+            return
+        }
+        UIApplication.shared.open(url, options: [:]) { opened in
+            if !opened { openFirst(Array(urls.dropFirst())) }
         }
     }
 }
@@ -491,6 +513,13 @@ struct InstalledAppRow: View {
                 Text(app.bundleID).font(.caption2).foregroundColor(.secondary).lineLimit(1)
                 if let version = app.version {
                     Text(version).font(.caption2).foregroundColor(.secondary)
+                }
+                if filter == .bound, updateURL == nil,
+                   let diagnostic = GitHubSourceCenter.shared.debugState[app.bundleID] {
+                    Text(diagnostic)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
                 }
             }
             Spacer(minLength: 8)
@@ -563,5 +592,79 @@ struct LiveContainerPill: View {
         .padding(.vertical, 4)
         .background(Capsule().fill(Color.black.opacity(0.82)))
         .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.5))
+    }
+}
+
+// MARK: - App switcher
+
+/// Launches another app the same way the grid icons do, without leaving My Apps first.
+struct AppSwitcherSheet: View {
+    let apps: [LocalApp]
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var downloadManager: DownloadManager
+    @State private var query = ""
+
+    private var shown: [LocalApp] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return apps }
+        return apps.filter {
+            $0.name.localizedCaseInsensitiveContains(trimmed) ||
+            $0.bundleID.localizedCaseInsensitiveContains(trimmed)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if shown.isEmpty {
+                    ContentUnavailableView {
+                        Text(L10n.t("没有应用", "No Apps"))
+                    } description: {
+                        Text(L10n.t("还没有已安装的应用。", "No installed apps yet."))
+                    }
+                }
+                ForEach(shown) { app in
+                    Button {
+                        launch(app)
+                    } label: {
+                        HStack(spacing: 12) {
+                            if let url = app.iconURL,
+                               let data = try? Data(contentsOf: url),
+                               let image = UIImage(data: data) {
+                                Image(uiImage: image).resizable()
+                                    .frame(width: 34, height: 34).cornerRadius(8)
+                            } else {
+                                Image(systemName: "app.fill").resizable()
+                                    .frame(width: 34, height: 34).foregroundColor(.gray)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(app.name).foregroundColor(.primary)
+                                Text(app.version ?? app.bundleID)
+                                    .font(.caption2).foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "arrow.up.forward.app")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(Text(L10n.t("切换到 App", "Switch App")))
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, prompt: Text(L10n.t("搜索应用", "Search apps")))
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(Text(L10n.t("完成", "Done"))) { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func launch(_ app: LocalApp) {
+        let name = app.url.lastPathComponent
+        if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(name)") {
+            UIApplication.shared.open(url)
+        }
+        dismiss()
     }
 }

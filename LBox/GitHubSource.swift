@@ -111,6 +111,13 @@ enum SourceConfidence: String, Codable, Sendable {
     }
 }
 
+/// Result of looking a repository up before binding it by hand.
+enum SourceLookupOutcome {
+    case ok(SourcePreview)
+    case noAsset
+    case failed(String)
+}
+
 /// Preview of a repository before binding it by hand.
 struct SourcePreview: Equatable {
     let version: String
@@ -166,6 +173,10 @@ enum VersionText {
         let a = normalize(candidate)
         let b = normalize(current)
         if a.isEmpty { return false }
+        if b.isEmpty { return true }
+        // An installed version like "nightly" or "build-42" cannot be ordered against "3.8.0":
+        // comparing the strings would report "nightly" as newer and hide every real update.
+        if let first = b.first, !first.isNumber { return true }
         if a == b { return false }
         return a.compare(b, options: .numeric) == .orderedDescending
     }
@@ -237,6 +248,23 @@ enum GitHubLink {
 
 // MARK: - Network
 
+enum GitHubAPIError: LocalizedError {
+    case http(Int)
+    case rateLimited
+    case badPayload
+
+    var errorDescription: String? {
+        switch self {
+        case .rateLimited:
+            return "GitHub API 限额已用尽（未填 token 时每小时 60 次）"
+        case .http(let code):
+            return "GitHub 返回 HTTP \(code)"
+        case .badPayload:
+            return "无法解析 GitHub 的返回内容"
+        }
+    }
+}
+
 enum GitHubAPI {
     static func fetchReleases(_ ref: GitHubSourceRef, token: String?) async throws -> [GitHubRelease] {
         guard let url = ref.releasesURL else { throw URLError(.badURL) }
@@ -253,9 +281,15 @@ enum GitHubAPI {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-            throw URLError(.badServerResponse)
+            if http.statusCode == 403 || http.statusCode == 429 {
+                throw GitHubAPIError.rateLimited
+            }
+            throw GitHubAPIError.http(http.statusCode)
         }
-        return try JSONDecoder().decode([GitHubRelease].self, from: data)
+        guard let releases = try? JSONDecoder().decode([GitHubRelease].self, from: data) else {
+            throw GitHubAPIError.badPayload
+        }
+        return releases
     }
 
     static func searchRepositories(_ query: String, token: String?) async -> [GitHubSourceRef] {
@@ -376,6 +410,13 @@ final class GitHubSourceCenter: ObservableObject {
 
     /// Bundle ID -> update that comes from the app's confirmed GitHub repository.
     @Published private(set) var updates: [String: GitHubUpdateInfo] = [:]
+    /// Bundle ID -> newest release of its bound repository, newer or not. Lets the app list offer
+    /// a download even when the installed build is already the latest one.
+    @Published private(set) var latest: [String: GitHubUpdateInfo] = [:]
+    /// Last request failure, so the UI can tell "rate limited" apart from "no .ipa in the repo".
+    @Published private(set) var lastError: String? = nil
+    /// Per-app explanation shown under a bound app: what was compared and what came back.
+    @Published private(set) var debugState: [String: String] = [:]
     /// Proposals waiting for confirmation.
     @Published private(set) var candidates: [SourceCandidate] = []
     @Published private(set) var isRefreshing: Bool = false
@@ -435,6 +476,7 @@ final class GitHubSourceCenter: ObservableObject {
 
         var newUpdates: [String: GitHubUpdateInfo] = [:]
         var pending: [SourceCandidate] = []
+        var debug: [String: String] = [:]
         var linked = 0
 
         for app in installedApps {
@@ -481,6 +523,18 @@ final class GitHubSourceCenter: ObservableObject {
             let list = await releases(for: bound.ref)
             let usable = list.filter { !$0.draft && $0.ipaAsset(matching: app.name) != nil }
 
+            if let newest = usable.max(by: { VersionText.isNewer($1.version, than: $0.version) }),
+               let newestAsset = newest.ipaAsset(matching: app.name) {
+                latest[bundleID] = GitHubUpdateInfo(
+                    kind: newest.prerelease ? .prerelease : .stable,
+                    version: newest.version,
+                    downloadURL: newestAsset.browserDownloadURL,
+                    tag: newest.tagName
+                )
+            } else {
+                latest.removeValue(forKey: bundleID)
+            }
+
             let stable = usable.filter { !$0.prerelease }
                 .max(by: { VersionText.isNewer($1.version, than: $0.version) })
             let pre = usable.filter { $0.prerelease }
@@ -503,6 +557,17 @@ final class GitHubSourceCenter: ObservableObject {
                 }
             }
 
+            let installed = app.version ?? ""
+            let stableText = stable.map { VersionText.normalize($0.version) } ?? "-"
+            let preText = pre.map { VersionText.normalize($0.version) } ?? "-"
+            if let release = chosen {
+                debug[bundleID] = "installed \(installed.isEmpty ? "?" : installed) · stable \(stableText) · pre \(preText) · newer: \(release.version)"
+            } else if let error = lastError {
+                debug[bundleID] = "installed \(installed.isEmpty ? "?" : installed) · request failed: \(error)"
+            } else {
+                debug[bundleID] = "installed \(installed.isEmpty ? "?" : installed) · stable \(stableText) · pre \(preText) · up to date"
+            }
+
             if let release = chosen, let asset = release.ipaAsset(matching: app.name) {
                 newUpdates[bundleID] = GitHubUpdateInfo(
                     kind: chosenKind,
@@ -516,7 +581,12 @@ final class GitHubSourceCenter: ObservableObject {
         pending.sort { $0.appName.localizedCaseInsensitiveCompare($1.appName) == .orderedAscending }
         updates = newUpdates
         candidates = pending
-        statusText = "GitHub: \(linked) confirmed, \(pending.count) pending"
+        debugState = debug
+        if let error = lastError {
+            statusText = "GitHub: \(linked) confirmed, \(pending.count) pending · \(error)"
+        } else {
+            statusText = "GitHub: \(linked) confirmed, \(pending.count) pending"
+        }
     }
 
     // MARK: Confirmation
@@ -544,18 +614,21 @@ final class GitHubSourceCenter: ObservableObject {
     }
 
     /// Used by the manual binding screen to show what a link actually points at.
-    func previewSource(_ ref: GitHubSourceRef, appName: String) async -> SourcePreview? {
+    func previewSource(_ ref: GitHubSourceRef, appName: String) async -> SourceLookupOutcome {
         let list = await releases(for: ref)
+        if list.isEmpty, let error = lastError {
+            return .failed(error)
+        }
         let usable = list.filter { !$0.draft && $0.ipaAsset(matching: appName) != nil }
         guard let latest = usable.max(by: { VersionText.isNewer($1.version, than: $0.version) }) else {
-            return nil
+            return .noAsset
         }
         let asset = latest.ipaAsset(matching: appName)
-        return SourcePreview(
+        return .ok(SourcePreview(
             version: latest.version,
             isPrerelease: latest.prerelease,
             assetName: asset?.name
-        )
+        ))
     }
 
     /// Binds a repository typed in by the user. Confirmed immediately.
@@ -610,8 +683,11 @@ final class GitHubSourceCenter: ObservableObject {
         do {
             let list = try await GitHubAPI.fetchReleases(ref, token: token)
             releaseCache[key] = (Date(), list)
+            if lastError != nil { lastError = nil }
             return list
         } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if lastError != message { lastError = message }
             return releaseCache[key]?.releases ?? []
         }
     }

@@ -931,7 +931,8 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Toggle(L10n.t("用 LiveContainer 安装", "Install via LiveContainer"), isOn: $dm.installViaLiveContainer)
-                    Text("Recommended. Hand the .ipa to LiveContainer so it can patch the app and keep its data; a bundle copied into Applications/ by hand can't be launched.")
+                    Text(L10n.t("推荐开启：把 ipa 交给 LiveContainer 打补丁并安装，这样 App 才能启动、数据也能保留；手动把 .app 拷进 Applications 是打不开的。",
+                                "Recommended. Hand the .ipa to LiveContainer so it can patch the app and keep its data; a bundle copied into Applications/ by hand cannot be launched."))
                         .font(.caption).foregroundColor(.secondary)
                 }
     }
@@ -1334,6 +1335,7 @@ struct ManualSourceSheet: View {
                         Text(previewError)
                             .font(.caption)
                             .foregroundColor(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     } else if let preview {
                         Text("Latest v\(preview.version)" + (preview.isPrerelease ? " · pre-release" : ""))
                             .font(.subheadline)
@@ -1389,9 +1391,19 @@ struct ManualSourceSheet: View {
             return
         }
         isPreviewing = true
-        let result = await center.previewSource(ref, appName: app.name)
-        preview = result
-        previewError = result == nil ? "No .ipa asset found in this repository" : ""
+        switch await center.previewSource(ref, appName: app.name) {
+        case .ok(let value):
+            preview = value
+            previewError = ""
+        case .noAsset:
+            preview = nil
+            previewError = L10n.t("这个仓库的 Release 里没有 .ipa 资产（可能只有 zip / apk）",
+                                  "This repository has no .ipa asset in its releases")
+        case .failed(let message):
+            preview = nil
+            previewError = L10n.t("请求 GitHub 失败：\(message)。可以在设置里填只读 token，或稍后重试。",
+                                  "GitHub request failed: \(message). Add a read-only token in Settings, or retry later.")
+        }
         isPreviewing = false
     }
 }
