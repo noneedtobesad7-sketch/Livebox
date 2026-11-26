@@ -178,7 +178,10 @@ struct InstalledAppsView: View {
         if let info = github.updates[app.bundleID] {
             return URL(string: info.downloadURL)
         }
-        if let item = viewModel.bestStoreItem(for: app.bundleID) {
+        // Store fallback: only when the store actually has something newer, otherwise the row
+        // would offer "Download" forever instead of settling on "Latest".
+        if let item = viewModel.bestStoreItem(for: app.bundleID),
+           VersionText.isNewer(item.version, than: app.version ?? "") {
             return URL(string: item.downloadURL)
         }
         return nil
@@ -245,9 +248,9 @@ struct InstalledAppsView: View {
                     let request = pendingInstall
                     pendingInstall = nil
                     if let request {
-                        // LiveContainer installs through its share extension: hand it the file
-                        // with the system share sheet (the URL scheme is not supported).
-                        shareURL = request.file
+                        // LiveContainer's share extension consumes the file it receives, so it
+                        // gets a throwaway copy and ipa_downloads keeps the original.
+                        shareURL = stageForSharing(request.file)
                     }
                 }
                 Button((L10n.t("取消", "Cancel")), role: .cancel) {
@@ -499,6 +502,22 @@ struct InstalledAppsView: View {
             if !opened {
                 openHost(Array(hosts.dropFirst()))
             }
+        }
+    }
+
+    /// Copies the .ipa into tmp so the shared file can be consumed without losing the download.
+    private func stageForSharing(_ file: URL) -> URL {
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent("ShareStage", isDirectory: true)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let dest = folder.appendingPathComponent(file.lastPathComponent)
+        try? fm.removeItem(at: dest)
+        do {
+            try fm.copyItem(at: file, to: dest)
+            return dest
+        } catch {
+            Logger.shared.log("ShareStage: copy failed \(error)")
+            return file
         }
     }
 

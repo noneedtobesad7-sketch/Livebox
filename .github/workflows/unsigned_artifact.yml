@@ -64,17 +64,17 @@ jobs:
           find "Payload/$APPNAME" -maxdepth 1 -name "*.lproj" -print
           ls "Payload/$APPNAME" | head -30
           echo "--- architectures ---"
-          lipo -info "Payload/$APPNAME/LBox" || true
+          lipo -info "Payload/$APPNAME/Livebox" || true
           echo "--- codesign (expected: not signed) ---"
           codesign -dv "Payload/$APPNAME" 2>&1 || true
-          zip -qry LBox.ipa Payload
-          ls -lh LBox.ipa
+          zip -qry Livebox.ipa Payload
+          ls -lh Livebox.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: LBox-IPA
-          path: LBox.ipa
+          name: Livebox-IPA
+          path: Livebox.ipa
           retention-days: 14
 
       - name: Upload build log (on failure)

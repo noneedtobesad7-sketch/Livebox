@@ -221,7 +221,13 @@ struct ContentView: View {
             // the extracted copy (and its Temp_ folder) behind. Re-present it on foreground.
             if downloadManager.pendingInstallation != nil { showConflictAlert = true }
             // A batch update pauses while LiveContainer installs; continue once we are back.
-            if downloadManager.isWaitingForExternalInstall { downloadManager.resumeAfterExternalInstall() }
+            if downloadManager.isWaitingForExternalInstall {
+                downloadManager.resumeAfterExternalInstall()
+                // The installed build just changed: re-run detection so the row settles on
+                // "Latest" instead of keeping a stale download button.
+                lastAutoUpdateCheck = .distantPast
+                Task { await autoCheckForUpdatesIfNeeded() }
+            }
             
             // Check the backup currently being verified, or fall back to the latest one
             let backupToCheck = verificationBackup ?? downloadManager.pendingBackups.last
@@ -257,39 +263,25 @@ struct StoreView: View {
     @ObservedObject var viewModel: AppStoreViewModel
     var body: some View {
         NavigationStack {
-            List {
-                if viewModel.isLoading && viewModel.fetchTotal > 0 {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Updating Repositories...")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        ProgressView(value: Double(viewModel.fetchProgress), total: Double(viewModel.fetchTotal))
-                            .progressViewStyle(.linear)
-                        HStack {
-                            Spacer()
-                            Text("\(viewModel.fetchProgress)/\(viewModel.fetchTotal)")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                }
-                
+            VStack(spacing: 8) {
                 if !viewModel.savedRepos.isEmpty {
-                    Picker("Source", selection: $viewModel.selectedRepoID) {
-                        Text("All Sources").tag(String?.none)
-                        ForEach(viewModel.getEnabledLeafRepos()) { repo in
-                            Text(StoreView.repoName(repo.name)).tag(repo.name as String?)
+                    HStack {
+                        Text(L10n.t("来源", "Source"))
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Picker("Source", selection: $viewModel.selectedRepoID) {
+                            Text("All Sources").tag(String?.none)
+                            ForEach(viewModel.getEnabledLeafRepos()) { repo in
+                                Text(StoreView.repoName(repo.name)).tag(repo.name as String?)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
                     }
-                    .pickerStyle(.menu).listRowBackground(Color.clear).padding(.bottom, 5)
+                    .padding(.horizontal)
                 }
-                ForEach(viewModel.filteredApps) { app in
-                    NavigationLink(destination: AppDetailView(app: app, viewModel: viewModel)) {
-                        AppListRow(app: app)
-                    }
-                }
+                listBody
             }
             .navigationTitle("Store")
             .toolbar {
@@ -311,6 +303,44 @@ struct StoreView: View {
                 SourceRefresh.markFetched()
             }
         }
+    }
+
+    /// One rounded card per row, no system grouped background: that removes the double
+    /// block that used to overlap at the top of the list.
+    private var listBody: some View {
+        List {
+                if viewModel.isLoading && viewModel.fetchTotal > 0 {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Updating Repositories...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        ProgressView(value: Double(viewModel.fetchProgress), total: Double(viewModel.fetchTotal))
+                            .progressViewStyle(.linear)
+                        HStack {
+                            Spacer()
+                            Text("\(viewModel.fetchProgress)/\(viewModel.fetchTotal)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                }
+                
+                ForEach(viewModel.filteredApps) { app in
+                    NavigationLink(destination: AppDetailView(app: app, viewModel: viewModel)) {
+                        AppListRow(app: app)
+                    }
+                    .listRowBackground(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color(uiColor: .secondarySystemBackground))
+                    )
+                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                    .listRowSeparator(.hidden)
+                }
+            }
+            .listStyle(.plain)
+            .contentMargins(.bottom, 96, for: .scrollContent)
     }
 }
 
@@ -480,6 +510,20 @@ struct DirectDownloadView: View {
     @State private var installURL: URL?
     @State private var fileScope: FileScope = .downloads
 
+    private func stagedShareCopy(_ file: URL) -> URL {
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent("ShareStage", isDirectory: true)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let dest = folder.appendingPathComponent(file.lastPathComponent)
+        try? fm.removeItem(at: dest)
+        do {
+            try fm.copyItem(at: file, to: dest)
+            return dest
+        } catch {
+            return file
+        }
+    }
+
     private var activeFiles: [URL] {
         fileScope == .downloads ? downloadManager.downloadFiles : downloadManager.backupFiles
     }
@@ -539,7 +583,7 @@ struct DirectDownloadView: View {
                             renamingFile = file
                             newFileName = file.lastPathComponent
                         }, onInstall: { url in
-                            installURL = url
+                            installURL = stagedShareCopy(url)
                         })
                     }
                     .onDelete { idx in idx.forEach { downloadManager.deleteFile(activeFiles[$0]) } }
