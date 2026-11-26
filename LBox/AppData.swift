@@ -22,8 +22,9 @@ enum RepoFetchStatus: Equatable, Sendable, Hashable {
 // MARK: - Sorting Enums
 enum AppSortOption: String, CaseIterable, Identifiable {
     case name = "Name"
-    case date = "Date"
-    case size = "Size"
+    case nameReverse = "Name (Z-A)"
+    case version = "Version"
+    case date = "Release date"
     
     var id: String { rawValue }
 }
@@ -1145,15 +1146,18 @@ class AppStoreViewModel: ObservableObject {
                 switch sortOrder {
                 case .name:
                     return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                case .nameReverse:
+                    return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedDescending
+                case .version:
+                    if lhs.version != rhs.version {
+                        return lhs.version.compare(rhs.version, options: .numeric) == .orderedDescending
+                    }
+                    return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
                 case .date:
                     let lDate = lhs.parsedVersionDate ?? .distantPast
                     let rDate = rhs.parsedVersionDate ?? .distantPast
                     if lDate != rDate { return lDate > rDate }
                     return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-                case .size:
-                    let lSize = lhs.size ?? 0
-                    let rSize = rhs.size ?? 0
-                    return lSize > rSize
                 }
             }
             return (grouped, sorted)

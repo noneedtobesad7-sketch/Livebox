@@ -9,10 +9,8 @@ struct ContentView: View {
     @State private var showSetupAlert = false
     @State private var showSetupPicker = false
     @State private var showFilePickerHelp = false
-    @State private var showDownloadSetupAlert = false 
     @AppStorage("kHasAskedForLiveContainerSetup") private var hasAskedForSetup = false
-    @AppStorage("kHasAskedDownloadFolder") private var hasAskedDownloadFolder = false
-    @State private var pickingDownloadFolder = false
+    @State private var pickingRootFolder = false
     
     // Alert States
     @State private var verificationBackup: AppBackup? = nil
@@ -64,31 +62,23 @@ struct ContentView: View {
             } message: { backup in
                 Text("Please run '\(backup.appName)' in LiveContainer to finalize the update, and then return to LBox.\n\nIf you have already run it and the update is not detected, you can try again or restore the previous version.")
             }
-            .alert("Setup LiveContainer", isPresented: $showSetupAlert) {
-                Button("Select Folder") { hasAskedForSetup = true; showSetupPicker = true }
-                Button("Trouble Selecting?", role: .none) { showFilePickerHelp = true }
-                Button("Later", role: .cancel) { hasAskedForSetup = true }
-            } message: {
-                Text("To enable auto-installation and launching, please select your LiveContainer storage directory.")
-            }
-            .alert(Text(L10n.t("设置下载目录", "Choose a download folder")), isPresented: $showDownloadSetupAlert) {
-                Button((L10n.t("选择文件夹", "Select Folder"))) {
-                    hasAskedDownloadFolder = true
-                    pickingDownloadFolder = true
-                    showSetupPicker = true
+            .alert(Text(L10n.t("先完成初始设置", "Finish setup")), isPresented: $showSetupAlert) {
+                Button((L10n.t("去设置", "Open Settings"))) {
+                    hasAskedForSetup = true
+                    selectedTab = 3
                 }
                 Button((L10n.t("稍后", "Later")), role: .cancel) {
-                    hasAskedDownloadFolder = true
+                    hasAskedForSetup = true
                 }
             } message: {
-                Text(L10n.t("Livebox 跑在 LiveContainer 里，默认目录在它的沙盒里、文件 App 看不到。建议选「我的 iPhone/下载」下的文件夹，下载的 ipa 和备份都能直接找到。",
-                            "Livebox runs inside LiveContainer, so its default folder lives in that sandbox and is invisible in Files. Pick a folder under \"On My iPhone\" instead."))
+                Text(L10n.t("请在「设置 → 存储与目录」里选择 LiveContainer 目录和存储根目录。下载的 ipa 会放在 <根目录>/ipa_downloads，备份会放在 <根目录>/ipa_backups，两者互不干扰。",
+                            "In Settings → Storage, pick the LiveContainer folder and a storage root. Downloads go to <root>/ipa_downloads and backups to <root>/ipa_backups, kept separate."))
             }
+
             .fileImporter(isPresented: $showSetupPicker, allowedContentTypes: [.folder]) { res in
                 if case .success(let url) = res {
-                    downloadManager.setCustomFolder(url, forApps: !pickingDownloadFolder)
+                    downloadManager.setCustomFolder(url, forApps: true)
                 }
-                pickingDownloadFolder = false
             }
             .alert("Have trouble selecting?", isPresented: $showFilePickerHelp) {
                 Button("Open LiveContainer") {
@@ -185,10 +175,9 @@ struct ContentView: View {
         viewModel.checkForUpdates(installedApps: downloadManager.installedApps)
         await autoCheckForUpdatesIfNeeded()
         try? await Task.sleep(nanoseconds: 500_000_000)
-        if !hasAskedForSetup && downloadManager.customLiveContainerFolder == nil {
+        if !hasAskedForSetup && (downloadManager.customLiveContainerFolder == nil
+                                 || downloadManager.customRootFolder == nil) {
             showSetupAlert = true
-        } else if !hasAskedDownloadFolder && downloadManager.customDownloadFolder == nil {
-            showDownloadSetupAlert = true
         }
     }
     
@@ -259,8 +248,9 @@ struct StoreView: View {
     static func sortLabel(_ option: AppSortOption) -> String {
         switch option {
         case .name: return L10n.t("名称", "Name")
-        case .date: return L10n.t("日期", "Date")
-        case .size: return L10n.t("大小", "Size")
+        case .nameReverse: return L10n.t("名称（倒序）", "Name (Z-A)")
+        case .version: return L10n.t("版本", "Version")
+        case .date: return L10n.t("更新日期", "Release date")
         }
     }
 
@@ -488,6 +478,11 @@ struct DirectDownloadView: View {
     @State private var newFileName = ""
     @State private var showFileImporter = false
     @State private var installURL: URL?
+    @State private var fileScope: FileScope = .downloads
+
+    private var activeFiles: [URL] {
+        fileScope == .downloads ? downloadManager.downloadFiles : downloadManager.backupFiles
+    }
     var body: some View {
         NavigationStack {
             List {
@@ -509,16 +504,18 @@ struct DirectDownloadView: View {
                 }
                 if !downloadManager.downloadHistory.isEmpty {
                     Section {
-                        ForEach(downloadManager.downloadHistory) { record in
-                            DownloadHistoryRow(record: record)
+                        ScrollView {
+                            VStack(spacing: 4) {
+                                ForEach(downloadManager.downloadHistory) { record in
+                                    DownloadHistoryRow(record: record)
+                                }
+                            }
+                            .padding(.vertical, 2)
                         }
-                        .onDelete { offsets in
-                            offsets.map { downloadManager.downloadHistory[$0] }
-                                .forEach { downloadManager.removeDownloadRecord($0) }
-                        }
+                        .frame(maxHeight: 186)
                     } header: {
                         HStack {
-                            Text(L10n.t("下载记录", "Downloads"))
+                            Text(L10n.t("下载记录", "Recent downloads"))
                             Spacer()
                             Button(L10n.t("清空", "Clear")) {
                                 downloadManager.clearDownloadHistory()
@@ -528,8 +525,16 @@ struct DirectDownloadView: View {
                         }
                     }
                 }
+
                 Section {
-                    ForEach(downloadManager.fileList, id: \.self) { file in
+                    Picker("", selection: $fileScope) {
+                        Text(L10n.t("下载文件", "Downloads")).tag(FileScope.downloads)
+                        Text(L10n.t("备份文件", "Backups")).tag(FileScope.backups)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    ForEach(activeFiles, id: \.self) { file in
                         FileRow(localURL: file, onRename: {
                             renamingFile = file
                             newFileName = file.lastPathComponent
@@ -537,17 +542,19 @@ struct DirectDownloadView: View {
                             installURL = url
                         })
                     }
-                    .onDelete { idx in idx.forEach { downloadManager.deleteFile(downloadManager.fileList[$0]) } }
-                } header: {
-                    HStack {
-                        Text("Files")
-                        Spacer()
-                        if !downloadManager.fileList.isEmpty {
-                            Button("Clear All") { downloadManager.clearAllFiles() }.font(.caption).foregroundColor(.red)
+                    .onDelete { idx in idx.forEach { downloadManager.deleteFile(activeFiles[$0]) } }
+
+                    if !activeFiles.isEmpty {
+                        Button(role: .destructive) {
+                            if fileScope == .downloads { downloadManager.clearDownloads() }
+                            else { downloadManager.clearBackups() }
+                        } label: {
+                            Text(L10n.t("清空当前列表", "Clear this list"))
                         }
                     }
                 } footer: {
-                    Text(L10n.t("位置：\(downloadManager.customDownloadFolder?.lastPathComponent ?? "默认")", "Loc: \(downloadManager.customDownloadFolder?.lastPathComponent ?? "Default")"))
+                    Text(L10n.t("位置：\(fileScope == .downloads ? "ipa_downloads" : "ipa_backups")",
+                                "Loc: \(fileScope == .downloads ? "ipa_downloads" : "ipa_backups")"))
                 }
             }
             .navigationTitle(Text(L10n.t("下载管理", "Download Manager")))
@@ -785,7 +792,7 @@ struct SettingsView: View {
     @State private var showCopyAlert = false
     @State private var didSelectLiveContainer = false
     @State private var showSettingsHelp = false
-    @State private var pickingBackupFolder = false
+    @State private var pickingRootFolder = false
     @State private var showBindingImport = false
     @State private var showBindingsExported = false
     /// Kept out of the view body: an inline ternary there pushes the type-checker over its limit.
@@ -815,9 +822,9 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: [.folder]) { res in 
                 if case .success(let url) = res { 
-                    if pickingBackupFolder {
-                        dm.setBackupFolder(url)
-                        pickingBackupFolder = false
+                    if pickingRootFolder {
+                        dm.setRootFolder(url)
+                        pickingRootFolder = false
                     } else if isPickingLiveContainer {
                         dm.setCustomFolder(url, forApps: true) 
                         didSelectLiveContainer = true 
@@ -825,7 +832,7 @@ struct SettingsView: View {
                         dm.setCustomFolder(url, forApps: false)
                     }
                 } else {
-                    pickingBackupFolder = false
+                    pickingRootFolder = false
                 }
             }
             .onChange(of: showFolderImporter) { isPresented in 
@@ -881,61 +888,48 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var directoriesSection: some View {
-                Section("Directories") {
-                    HStack { 
-                        Text("Downloads")
-                        Spacer() 
-                        if dm.customDownloadFolder != nil { 
-                            Button("Default") { dm.clearCustomFolder(forApps: false) }.buttonStyle(.bordered) 
-                        }
-                        Button("Select") { 
-                            isPickingLiveContainer = false
-                            pickingBackupFolder = false
-                            showFolderImporter = true 
-                        } 
-                    }
+                Section(L10n.t("存储与目录", "Storage")) {
                     HStack {
-                        Text(L10n.t("下载占用", "Downloads size"))
-                        Spacer()
-                        Text(ByteCountFormatter.string(fromByteCount: dm.downloadsSizeBytes, countStyle: .file))
-                            .foregroundColor(.secondary)
-                        if dm.downloadsSizeBytes > 0 {
-                            Button(L10n.t("清空", "Clear"), role: .destructive) { dm.clearAllFiles() }
-                                .buttonStyle(.borderless)
-                        }
-                    }
-                    HStack { 
                         Text("LiveContainer")
-                        Spacer() 
-                        if dm.customLiveContainerFolder != nil { 
-                            Button("Default") { dm.clearCustomFolder(forApps: true) }.buttonStyle(.bordered) 
-                        }
-                        Button("Select") { 
-                            isPickingLiveContainer = true
-                            pickingBackupFolder = false
-                            showFolderImporter = true 
-                        } 
-                    }
-                    HStack {
-                        Text(L10n.t("备份目录", "Backups"))
                         Spacer()
-                        if dm.customBackupFolder != nil {
-                            Button("Default") { dm.clearBackupFolder() }.buttonStyle(.bordered)
+                        if dm.customLiveContainerFolder != nil {
+                            Button("Default") { dm.clearCustomFolder(forApps: true) }.buttonStyle(.bordered)
                         }
                         Button("Select") {
-                            pickingBackupFolder = true
+                            isPickingLiveContainer = true
+                            pickingRootFolder = false
                             showFolderImporter = true
                         }
                     }
-                    Text(dm.backupFolderDisplayName)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    HStack {
+                        Text(L10n.t("存储根目录", "Storage root"))
+                        Spacer()
+                        if dm.customRootFolder != nil {
+                            Button("Default") { dm.clearRootFolder() }.buttonStyle(.bordered)
+                        }
+                        Button("Select") {
+                            isPickingLiveContainer = false
+                            pickingRootFolder = true
+                            showFolderImporter = true
+                        }
+                    }
+                    Text(L10n.t("下载：\(dm.storageRootDisplayName)/ipa_downloads", "Downloads: \(dm.storageRootDisplayName)/ipa_downloads"))
+                        .font(.caption).foregroundColor(.secondary)
+                    Text(L10n.t("备份：\(dm.storageRootDisplayName)/ipa_backups", "Backups: \(dm.storageRootDisplayName)/ipa_backups"))
+                        .font(.caption).foregroundColor(.secondary)
+                    HStack {
+                        Text(L10n.t("占用", "Size"))
+                        Spacer()
+                        Text("\(ByteCountFormatter.string(fromByteCount: dm.downloadsSizeBytes, countStyle: .file)) + \(ByteCountFormatter.string(fromByteCount: dm.backupsSizeBytes, countStyle: .file))")
+                            .foregroundColor(.secondary)
+                    }
                     Toggle(L10n.t("用 LiveContainer 安装", "Install via LiveContainer"), isOn: $dm.installViaLiveContainer)
-                    Text(L10n.t("推荐开启：把 ipa 交给 LiveContainer 打补丁并安装，这样 App 才能启动、数据也能保留；手动把 .app 拷进 Applications 是打不开的。",
-                                "Recommended. Hand the .ipa to LiveContainer so it can patch the app and keep its data; a bundle copied into Applications/ by hand cannot be launched."))
+                    Text(L10n.t("推荐开启：把 ipa 交给 LiveContainer 打补丁并安装，App 才能启动、数据也能保留。",
+                                "Recommended. Hand the .ipa to LiveContainer so it can patch the app and keep its data."))
                         .font(.caption).foregroundColor(.secondary)
                 }
     }
+
 
     @ViewBuilder private var storeSection: some View {
                 Section("Store") {
@@ -1057,7 +1051,7 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var backupRestoreSection: some View {
-                Section("Backup/Restore") {
+                Section(L10n.t("备份源 / 恢复源", "Sources: backup / restore")) {
                     Menu("Export Repos...") {
                         Button("Copy as JSON") {
                             if viewModel.savedRepos.contains(where: { $0.hasDisabledContentRecursive }) { showCopyAlert = true } else { if let s = viewModel.exportReposJSON() { UIPasteboard.general.string = s } }
@@ -1460,4 +1454,10 @@ struct BindingImportSheet: View {
             }
         }
     }
+}
+
+/// Which folder the Downloads tab is listing.
+enum FileScope: Hashable {
+    case downloads
+    case backups
 }

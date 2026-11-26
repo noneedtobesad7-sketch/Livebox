@@ -124,8 +124,18 @@ class DownloadManager: NSObject, ObservableObject {
     // Files currently being extracted
     @Published var extractingFiles: Set<URL> = []
     
-    @Published var customDownloadFolder: URL? = nil
+    /// Single user picked root. Downloads live in `<root>/ipa_downloads`, backups in
+    /// `<root>/ipa_backups`.
+    @Published var customRootFolder: URL? = nil
     @Published var customLiveContainerFolder: URL? = nil 
+
+    var customDownloadFolder: URL? {
+        customRootFolder.map { $0.appendingPathComponent("ipa_downloads", isDirectory: true) }
+    }
+
+    var customBackupFolder: URL? {
+        customRootFolder.map { $0.appendingPathComponent("ipa_backups", isDirectory: true) }
+    }
     /// Where archived .ipa files are kept. nil = <downloads>/IPA_Backups
     @Published var customBackupFolder: URL? = nil
     
@@ -195,6 +205,11 @@ class DownloadManager: NSObject, ObservableObject {
 
     /// Total size of the files sitting in the download folder (shown in Settings).
     @Published var downloadsSizeBytes: Int64 = 0
+    /// Same for the backup folder.
+    @Published var backupsSizeBytes: Int64 = 0
+    /// Files shown in the Downloads tab (split by folder so "clear" can be scoped).
+    @Published var downloadFiles: [URL] = []
+    @Published var backupFiles: [URL] = []
     
     private var urlSession: URLSession!
     private var tasks: [URL: URLSessionDownloadTask] = [:]
@@ -209,6 +224,7 @@ class DownloadManager: NSObject, ObservableObject {
     private let kPendingBackupsKey = "kPendingBackupsKey"
     private let kRetainedBackupsKey = "kRetainedBackupsKey"
     private let kCustomBackupFolderKey = "kCustomBackupFolderBookmark"
+    private let kCustomRootFolderKey = "kCustomRootFolderBookmark"
     
     // URL String -> Filename in Caches
     private var diskResumeDataPaths: [String: String] = [:]
@@ -257,7 +273,10 @@ class DownloadManager: NSObject, ObservableObject {
     // MARK: - Directories
     
     var currentDownloadFolder: URL {
-        if let custom = customDownloadFolder { return custom }
+        if let custom = customDownloadFolder {
+            try? FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+            return custom
+        }
         return DownloadManager.defaultFolder("ipa_downloads")
     }
 
@@ -289,20 +308,18 @@ class DownloadManager: NSObject, ObservableObject {
     }
     
     var backupDirectory: URL {
-        if let custom = customBackupFolder { return custom }
+        if let custom = customBackupFolder {
+            try? FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+            return custom
+        }
         return DownloadManager.defaultFolder("ipa_backups")
     }
     
     // MARK: - IPA Archive
     
-    /// Folder that keeps one copy of the newest .ipa per app.
+    /// Folder that keeps one copy of the newest .ipa per app (same place as backups now).
     var ipaArchiveDirectory: URL {
-        let folder: URL
-        if let custom = customBackupFolder {
-            folder = custom.appendingPathComponent("IPA_Backups")
-        } else {
-            folder = currentDownloadFolder.appendingPathComponent("IPA_Backups")
-        }
+        let folder = backupDirectory
         if !FileManager.default.fileExists(atPath: folder.path) {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         }
@@ -806,32 +823,89 @@ class DownloadManager: NSObject, ObservableObject {
     }
     
     private func restoreFolders() {
-        restoreFolder(key: kCustomDownloadFolderKey) { self.customDownloadFolder = $0 }
         restoreFolder(key: kCustomLiveContainerFolderKey) { self.customLiveContainerFolder = $0 }
-        restoreFolder(key: kCustomBackupFolderKey) { self.customBackupFolder = $0 }
+        restoreFolder(key: kCustomRootFolderKey) { self.customRootFolder = $0 }
+        if customRootFolder == nil {
+            adoptLegacyFolderAsRoot()
+        }
+        ensureStorageSubfolders()
     }
-    
-    /// Directory used for .ipa archives, resolved to the bundled default when unset.
-    var backupFolderDisplayName: String {
-        if let custom = customBackupFolder { return custom.lastPathComponent }
-        return "Downloads/IPA_Backups"
+
+    /// 2.0.2 kept two separate bookmarks. Fold the old download folder (or the backup folder)
+    /// into a single root so upgrades keep working without asking again.
+    private func adoptLegacyFolderAsRoot() {
+        var oldDownload: URL? = nil
+        var oldBackup: URL? = nil
+        restoreFolder(key: kCustomDownloadFolderKey) { oldDownload = $0 }
+        restoreFolder(key: kCustomBackupFolderKey) { oldBackup = $0 }
+        guard let candidate = oldDownload ?? oldBackup else { return }
+
+        // `<somewhere>/ipa_downloads` -> root is its parent; otherwise use the folder itself.
+        let root: URL
+        if candidate.lastPathComponent == "ipa_downloads" || candidate.lastPathComponent == "ipa_backups" {
+            root = candidate.deletingLastPathComponent()
+        } else {
+            root = candidate
+        }
+        setRootFolder(root)
+        // Old loose .ipa files at the root should stay visible in the downloads list.
+        migrateLooseIPAs(into: root.appendingPathComponent("ipa_downloads", isDirectory: true), from: [candidate, root])
+        UserDefaults.standard.removeObject(forKey: kCustomDownloadFolderKey)
+        UserDefaults.standard.removeObject(forKey: kCustomBackupFolderKey)
+        Logger.shared.log("Storage: adopted \(root.path) as the root folder")
     }
-    
-    func setBackupFolder(_ url: URL) {
+
+    private func ensureStorageSubfolders() {
+        for folder in [currentDownloadFolder, backupDirectory] {
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+    }
+
+    private func migrateLooseIPAs(into destination: URL, from sources: [URL]) {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        var seen = Set<String>()
+        for source in sources {
+            guard seen.insert(source.path).inserted else { continue }
+            guard let items = try? fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) else { continue }
+            for item in items where item.pathExtension.lowercased() == "ipa" {
+                let target = destination.appendingPathComponent(item.lastPathComponent)
+                guard !fm.fileExists(atPath: target.path) else { continue }
+                try? fm.moveItem(at: item, to: target)
+            }
+        }
+    }
+
+    func setRootFolder(_ url: URL) {
         do {
             guard url.startAccessingSecurityScopedResource() else { return }
             defer { url.stopAccessingSecurityScopedResource() }
             let bookmarkData = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
-            UserDefaults.standard.set(bookmarkData, forKey: kCustomBackupFolderKey)
-            self.customBackupFolder = url
+            UserDefaults.standard.set(bookmarkData, forKey: kCustomRootFolderKey)
+            self.customRootFolder = url
+            ensureStorageSubfolders()
+            refreshFileList()
         } catch {
-            print("Failed to save backup folder bookmark: \(error)")
+            Logger.shared.log("Storage: failed to save root bookmark: \(error)")
         }
     }
+
+    func clearRootFolder() {
+        UserDefaults.standard.removeObject(forKey: kCustomRootFolderKey)
+        self.customRootFolder = nil
+        refreshFileList()
+    }
+
+    /// Human readable location shown in Settings.
+    var storageRootDisplayName: String {
+        if let root = customRootFolder { return root.lastPathComponent }
+        return "App Documents/Downloads"
+    }
     
-    func clearBackupFolder() {
-        UserDefaults.standard.removeObject(forKey: kCustomBackupFolderKey)
-        self.customBackupFolder = nil
+    /// Directory used for .ipa archives, resolved to the bundled default when unset.
+    var backupFolderDisplayName: String {
+        if let root = customRootFolder { return root.lastPathComponent + "/ipa_backups" }
+        return "Downloads/ipa_backups"
     }
     
     private func restoreFolder(key: String, assign: (URL) -> Void) {
@@ -1073,11 +1147,42 @@ class DownloadManager: NSObject, ObservableObject {
     
     func refreshFileList() {
         recalcDownloadsSize()
-        do {
-            let files = try FileManager.default.contentsOfDirectory(at: currentDownloadFolder, includingPropertiesForKeys: nil)
-            let filtered = files.filter { !$0.lastPathComponent.hasPrefix(".") && $0.pathExtension != "app" }
-            self.fileList = filtered
-        } catch { self.fileList = [] }
+        let downloads = listFiles(in: currentDownloadFolder)
+        self.fileList = downloads
+        self.downloadFiles = downloads
+        self.backupFiles = listFiles(in: backupDirectory)
+        self.backupsSizeBytes = folderSize(backupDirectory)
+    }
+
+    private func listFiles(in folder: URL) -> [URL] {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        return files.filter { !$0.lastPathComponent.hasPrefix(".") && $0.pathExtension != "app" }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    private func folderSize(_ folder: URL) -> Int64 {
+        guard let items = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileSizeKey]) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for item in items {
+            if let size = (try? item.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
+    func clearDownloads() {
+        for url in downloadFiles { try? FileManager.default.removeItem(at: url) }
+        refreshFileList()
+    }
+
+    func clearBackups() {
+        for url in backupFiles { try? FileManager.default.removeItem(at: url) }
+        refreshFileList()
     }
     
     func refreshInstalledApps() {
@@ -1274,26 +1379,6 @@ class DownloadManager: NSObject, ObservableObject {
         if isBatchUpdating { advanceBatchUpdate() }
     }
     
-    /// Extracts the .ipa into the applications folder the way upstream LBox did, without going
-    /// through LiveContainer's install flow. The app has to be launched once afterwards so
-    /// LiveContainer can (re)prepare it.
-    func extractWithoutLiveContainer(file: URL) {
-        Task {
-            _ = await MainActor.run { self.extractingFiles.insert(file) }
-            do {
-                try await extractApp(from: file)
-                _ = await MainActor.run {
-                    self.extractingFiles.remove(file)
-                    self.refreshFileList()
-                    self.refreshInstalledApps()
-                }
-            } catch {
-                Logger.shared.log("Legacy extract failed: \(error)")
-                _ = await MainActor.run { self.extractingFiles.remove(file) }
-            }
-        }
-    }
-
     func convertToApp(file: URL) {
         if installViaLiveContainer {
             Task { _ = await handOffToLiveContainer(file) }
