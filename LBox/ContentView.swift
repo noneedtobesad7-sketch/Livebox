@@ -332,10 +332,10 @@ struct StoreView: View {
                         AppListRow(app: app)
                     }
                     .listRowBackground(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .fill(Color(uiColor: .secondarySystemBackground))
                     )
-                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                     .listRowSeparator(.hidden)
                 }
             }

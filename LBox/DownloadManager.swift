@@ -1,3 +1,7 @@
+        // Snapshot the installed build first when the user enabled it in Settings.
+        if let app {
+            await snapshotBeforeInstall(app)
+        }
 import Foundation
 import SwiftUI
 import Combine
@@ -227,7 +231,9 @@ class DownloadManager: NSObject, ObservableObject {
     private var diskResumeDataPaths: [String: String] = [:]
     
     override init() {
-        self.isAutoUnzipEnabled = UserDefaults.standard.bool(forKey: "kAutoUnzipEnabled")
+        // 2.0.6: auto-extract is gone for good; only an explicit "legacy" install unzips.
+        UserDefaults.standard.set(false, forKey: "kAutoUnzipEnabled")
+        self.isAutoUnzipEnabled = false
         self.installViaLiveContainer = UserDefaults.standard.object(forKey: "kInstallViaLiveContainer") as? Bool ?? true
         self.isAutoArchivingIPAs = UserDefaults.standard.object(forKey: "kAutoArchivingIPAs") as? Bool ?? true
         super.init()
@@ -1334,21 +1340,22 @@ class DownloadManager: NSObject, ObservableObject {
         }
 
         let fm = FileManager.default
-        var payload = ipa
-        if !ipa.path.hasPrefix(root.deletingLastPathComponent().path) {
-            guard let dir = lcHandoffDirectory else { return false }
-            let dest = dir.appendingPathComponent(ipa.lastPathComponent)
-            do {
-                if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-                try fm.copyItem(at: ipa, to: dest)
-                payload = dest
-                lastHandOffPath = dest.path
-            } catch {
-                Logger.shared.log("HandOff: copy failed \(error)")
-                sendNotification(title: L10n.t("安装失败", "Install failed"), body: L10n.t("无法准备 \(ipa.lastPathComponent)。", "Could not prepare \(ipa.lastPathComponent)."), type: .error)
-                return false
-            }
+        // LiveContainer deletes the .ipa it installed from (`installIpaFile` -> removeItem), so
+        // it always gets a throwaway copy; the original stays in ipa_downloads.
+        let staging = lcHandoffDirectory
+            ?? fm.temporaryDirectory.appendingPathComponent("ShareStage", isDirectory: true)
+        try? fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        let staged = staging.appendingPathComponent(ipa.lastPathComponent)
+        try? fm.removeItem(at: staged)
+        guard (try? fm.copyItem(at: ipa, to: staged)) != nil else {
+            Logger.shared.log("HandOff: staging copy failed")
+            sendNotification(title: L10n.t("安装失败", "Install failed"),
+                             body: L10n.t("无法准备 \(ipa.lastPathComponent)。", "Could not prepare \(ipa.lastPathComponent)."),
+                             type: .error)
+            return false
         }
+        let payload = staged
+        lastHandOffPath = staged.path
 
         var components = URLComponents(string: "livecontainer://install")
         components?.queryItems = [URLQueryItem(name: "url", value: payload.absoluteString)]
@@ -1357,6 +1364,19 @@ class DownloadManager: NSObject, ObservableObject {
         Logger.shared.log("HandOff: opening LiveContainer for \(payload.lastPathComponent)")
         UIApplication.shared.open(url, options: [:], completionHandler: nil)
         return true
+    }
+
+    /// Keeps the current build (plus its data when the full snapshot is enabled) so the update can
+    /// be rolled back later. No-op unless the user turned the setting on.
+    func snapshotBeforeInstall(_ app: LocalApp) async {
+        guard let snapshot = await UpdateBackup.snapshot(app: app,
+                                                         backupRoot: backupDirectory,
+                                                         dataRoot: currentDataApplicationFolder) else { return }
+        retainBackup(bundlePath: snapshot,
+                     appName: app.name,
+                     bundleID: app.bundleID,
+                     version: app.version,
+                     installPath: app.url.lastPathComponent)
     }
 
     /// Marks that the install hand-off is in flight, so coming back refreshes the app list.
@@ -1506,7 +1526,7 @@ class DownloadManager: NSObject, ObservableObject {
                 
                 try fileManager.moveItem(at: appBundle, to: finalURL)
                 
-                if sourceURL.path.contains(currentDownloadFolder.path) { try? fileManager.removeItem(at: sourceURL) }
+                // Keep the downloaded .ipa: it is the user's copy and the rollback source.
                 try? fileManager.removeItem(at: tempUnzipDir)
                 
             } else { try? fileManager.removeItem(at: tempUnzipDir) }
@@ -1756,17 +1776,9 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 
                 self.sendNotification(title: L10n.t("下载完成", "Download complete"), body: L10n.t("\(finalName) 已下载。", "\(finalName) has been downloaded."), type: .success)
                 
-                if self.isBatchUpdating && finalURL.pathExtension.lowercased() == "ipa" {
-                    // Downloads only: installing is an explicit action in the Apps list.
-                    self.advanceBatchUpdate()
-                } else if (self.isAutoUnzipEnabled || self.isBatchUpdating) && finalURL.pathExtension.lowercased() == "ipa" {
-                    self.extractingFiles.insert(finalURL)
-                    try await self.extractApp(from: finalURL)
-                    if self.pendingInstallation == nil {
-                        self.extractingFiles.remove(finalURL)
-                        self.advanceBatchUpdate()
-                    }
-                } else if self.isBatchUpdating {
+                // Downloads are passive: nothing is unzipped or installed here. Installing is an
+                // explicit action, and it goes through LiveContainer's share sheet.
+                if self.isBatchUpdating {
                     self.advanceBatchUpdate()
                 }
                 
