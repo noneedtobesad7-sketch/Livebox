@@ -136,9 +136,6 @@ class DownloadManager: NSObject, ObservableObject {
     var customBackupFolder: URL? {
         customRootFolder.map { $0.appendingPathComponent("ipa_backups", isDirectory: true) }
     }
-    /// Where archived .ipa files are kept. nil = <downloads>/IPA_Backups
-    @Published var customBackupFolder: URL? = nil
-    
     // Pending Installation (Collision)
     @Published var pendingInstallation: PendingInstallation? = nil
     
@@ -995,6 +992,11 @@ class DownloadManager: NSObject, ObservableObject {
     }
     
     func setCustomFolder(_ url: URL, forApps: Bool) {
+        if !forApps {
+            // The UI only exposes one storage root now; downloads live in <root>/ipa_downloads.
+            setRootFolder(url)
+            return
+        }
         do {
             guard url.startAccessingSecurityScopedResource() else { return }
             defer { url.stopAccessingSecurityScopedResource() }
@@ -1002,29 +1004,22 @@ class DownloadManager: NSObject, ObservableObject {
             let key = forApps ? kCustomLiveContainerFolderKey : kCustomDownloadFolderKey
             UserDefaults.standard.set(bookmarkData, forKey: key)
             
-            if forApps {
-                self.customLiveContainerFolder = url
-                self.isAutoUnzipEnabled = true // Auto-enable as requested
-                refreshInstalledApps()
-            } else {
-                self.customDownloadFolder = url
-                refreshFileList()
-            }
+            self.customLiveContainerFolder = url
+            self.isAutoUnzipEnabled = true // Auto-enable as requested
+            refreshInstalledApps()
         } catch {
             print("Failed to save bookmark: \(error)")
         }
     }
     
     func clearCustomFolder(forApps: Bool) {
-        let key = forApps ? kCustomLiveContainerFolderKey : kCustomDownloadFolderKey
-        UserDefaults.standard.removeObject(forKey: key)
-        if forApps {
-            self.customLiveContainerFolder = nil
-            refreshInstalledApps()
-        } else {
-            self.customDownloadFolder = nil
-            refreshFileList()
+        if !forApps {
+            clearRootFolder()
+            return
         }
+        UserDefaults.standard.removeObject(forKey: kCustomLiveContainerFolderKey)
+        self.customLiveContainerFolder = nil
+        refreshInstalledApps()
     }
     
     func startDownload(url: URL) {
