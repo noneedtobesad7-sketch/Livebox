@@ -1314,6 +1314,7 @@ class DownloadManager: NSObject, ObservableObject {
     @discardableResult
     func handOffToLiveContainer(_ ipa: URL, app: LocalApp? = nil) async -> Bool {
         guard ipa.pathExtension.lowercased() == "ipa" else { return false }
+        if let app { archiveIPABeforeInstall(ipa, app: app) }
 
         // Snapshot the installed build before LiveContainer replaces it, so it can be rolled back.
         if let app,
@@ -1334,21 +1335,22 @@ class DownloadManager: NSObject, ObservableObject {
         }
 
         let fm = FileManager.default
-        var payload = ipa
-        if !ipa.path.hasPrefix(root.deletingLastPathComponent().path) {
-            guard let dir = lcHandoffDirectory else { return false }
-            let dest = dir.appendingPathComponent(ipa.lastPathComponent)
-            do {
-                if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-                try fm.copyItem(at: ipa, to: dest)
-                payload = dest
-                lastHandOffPath = dest.path
-            } catch {
-                Logger.shared.log("HandOff: copy failed \(error)")
-                sendNotification(title: L10n.t("安装失败", "Install failed"), body: L10n.t("无法准备 \(ipa.lastPathComponent)。", "Could not prepare \(ipa.lastPathComponent)."), type: .error)
-                return false
-            }
+        // LiveContainer deletes the .ipa it installed from (`installIpaFile` -> removeItem), so it
+        // always gets a throwaway copy; the download stays in ipa_downloads.
+        let staging = lcHandoffDirectory
+            ?? fm.temporaryDirectory.appendingPathComponent("ShareStage", isDirectory: true)
+        try? fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        let staged = staging.appendingPathComponent(ipa.lastPathComponent)
+        try? fm.removeItem(at: staged)
+        guard (try? fm.copyItem(at: ipa, to: staged)) != nil else {
+            Logger.shared.log("HandOff: staging copy failed")
+            sendNotification(title: L10n.t("安装失败", "Install failed"),
+                             body: L10n.t("无法准备 \(ipa.lastPathComponent)。", "Could not prepare \(ipa.lastPathComponent)."),
+                             type: .error)
+            return false
         }
+        let payload = staged
+        lastHandOffPath = staged.path
 
         var components = URLComponents(string: "livecontainer://install")
         components?.queryItems = [URLQueryItem(name: "url", value: payload.absoluteString)]
@@ -1763,9 +1765,8 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 
                 self.sendNotification(title: L10n.t("下载完成", "Download complete"), body: L10n.t("\(finalName) 已下载。", "\(finalName) has been downloaded."), type: .success)
                 
-                // Downloads are passive: nothing is unzipped or installed here. The old auto-extract
-                // branch archived a copy into ipa_backups and then deleted the .ipa itself, which
-                // looked like the download vanishing after an update.
+                // Downloads stay passive: the row has to walk 下载 -> 安装 -> 最新 by itself, and
+                // installing is an explicit tap. Nothing is unzipped or deleted here.
                 if self.isBatchUpdating {
                     self.advanceBatchUpdate()
                 }

@@ -590,7 +590,10 @@ struct DirectDownloadView: View {
                             renamingFile = file
                             newFileName = file.lastPathComponent
                         }, onInstall: { url in
-                            installURL = stagedShareCopy(url)
+                            Task {
+                                let handedOff = await downloadManager.handOffToLiveContainer(url)
+                                if !handedOff { installURL = stagedShareCopy(url) }
+                            }
                         })
                     }
                     .onDelete { idx in idx.forEach { downloadManager.deleteFile(activeFiles[$0]) } }

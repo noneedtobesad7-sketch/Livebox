@@ -399,8 +399,15 @@ struct InstalledAppsView: View {
                                     title: L10n.t("这个 ipa 装不了", "This .ipa cannot be installed"),
                                     message: problem,
                                     type: .error)
-                            } else {
-                                pendingInstall = PendingInstall(file: file, app: app)
+                                return
+                            }
+                            // Same path 2.0.4 used: hand the file straight to LiveContainer with
+                            // `livecontainer://install?url=`, no share sheet in the way.
+                            Task {
+                                let handedOff = await downloadManager.handOffToLiveContainer(file, app: app)
+                                if !handedOff {
+                                    pendingInstall = PendingInstall(file: file, app: app)
+                                }
                             }
                         },
                         onBind: { bindTarget = $0 },
