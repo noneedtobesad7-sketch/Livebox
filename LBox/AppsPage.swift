@@ -248,12 +248,10 @@ struct InstalledAppsView: View {
                     let request = pendingInstall
                     pendingInstall = nil
                     if let request {
-                        // Snapshot first (no-op unless enabled), then hand over a throwaway copy:
-                        // LiveContainer deletes the .ipa it installs from.
-                        Task {
-                            await downloadManager.snapshotBeforeInstall(request.app)
-                            shareURL = stageForSharing(request.file)
-                        }
+                        // Keep a copy for the backup folder, then hand over a throwaway file:
+                        // LiveContainer deletes whatever .ipa it installs from.
+                        downloadManager.archiveIPABeforeInstall(request.file, app: request.app)
+                        shareURL = stageForSharing(request.file)
                     }
                 }
                 Button((L10n.t("取消", "Cancel")), role: .cancel) {

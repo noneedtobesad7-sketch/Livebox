@@ -330,12 +330,19 @@ struct StoreView: View {
                 ForEach(viewModel.filteredApps) { app in
                     NavigationLink(destination: AppDetailView(app: app, viewModel: viewModel)) {
                         AppListRow(app: app)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Color(uiColor: .secondarySystemBackground))
+                            )
+                            // Real gaps: the card is drawn on the row content. With listRowBackground
+                            // the fill always covers the whole row, so insets never showed.
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
                     }
-                    .listRowBackground(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color(uiColor: .secondarySystemBackground))
-                    )
-                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                 }
             }
