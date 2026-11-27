@@ -18,6 +18,9 @@ struct ContentView: View {
     
     // Automatic update checking
     @AppStorage("kAutoCheckUpdates") private var autoCheckUpdates = true
+    /// Seconds between automatic update checks; 0 = manual only.
+    @AppStorage("kUpdateCheckSeconds") private var updateCheckSeconds = 900
+    @AppStorage("kSkipAutoCheckWithoutToken") private var skipAutoCheckWithoutToken = false
     // Language: "system" | "zh-Hans" | "en"
     @AppStorage("kAppLanguage") private var appLanguage = "system"
     // Theme: "system" | "light" | "dark"
@@ -197,8 +200,17 @@ struct ContentView: View {
             await viewModel.fetchAllRepos()
         }
 
-        // GitHub release checks keep the short in-session throttle.
-        guard Date().timeIntervalSince(lastAutoUpdateCheck) > 900 else { return }
+        // Frequency comes from Settings; 0 means "manual only".
+        guard updateCheckSeconds > 0 else { return }
+        if skipAutoCheckWithoutToken {
+            let token = (UserDefaults.standard.string(forKey: "kGitHubToken") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty else {
+                Logger.shared.log("AutoCheck: skipped, no GitHub token")
+                return
+            }
+        }
+        guard Date().timeIntervalSince(lastAutoUpdateCheck) > TimeInterval(updateCheckSeconds) else { return }
         lastAutoUpdateCheck = Date()
         viewModel.checkForUpdates(installedApps: downloadManager.installedApps)
         await GitHubSourceCenter.shared.refresh(
@@ -298,7 +310,7 @@ struct StoreView: View {
                             }
                         }
                     } label: {
-                        Image(systemName: "arrow.up.arrow.down")
+                        Text(L10n.t("排序", "Sort"))
                     }
                 }
             }
@@ -567,6 +579,7 @@ struct DirectDownloadView: View {
             downloadManager.refreshFileList()
             importNotice = L10n.t("已导入，长按可安装", "Imported - long-press to install")
         } catch {
+            Logger.shared.error("Import failed for \(name): \(error.localizedDescription)")
             importNotice = L10n.t("导入失败：\(error.localizedDescription)",
                                   "Import failed: \(error.localizedDescription)")
         }
@@ -951,6 +964,8 @@ struct FileRow: View {
 
 struct SettingsView: View {
     @AppStorage("kSourceRefreshDays") private var sourceRefreshDays: Int = 1
+    @AppStorage("kUpdateCheckSeconds") private var updateCheckSeconds = 900
+    @AppStorage("kSkipAutoCheckWithoutToken") private var skipAutoCheckWithoutToken = false
     @AppStorage("kLoggingEnabled") private var loggingEnabled = true
     @AppStorage("kBackupAppBeforeUpdate") private var backupAppBeforeUpdate = false
     @AppStorage("kBackupFullSnapshot") private var backupFullSnapshot = false
@@ -1124,18 +1139,36 @@ struct SettingsView: View {
 
     @ViewBuilder private var storeSection: some View {
                 Section("Store") {
-                   Toggle("Strict Grouping", isOn: $viewModel.strictGrouping)
+                   Toggle(L10n.t("同一 App 多来源时分开显示", "List the same app from different sources separately"),
+                          isOn: $viewModel.strictGrouping)
                    if viewModel.strictGrouping {
-                       Text("Apps with different sources, names, or descriptions will be listed separately.").font(.caption).foregroundColor(.secondary)
+                       Text(L10n.t("Bundle ID、名称、来源或描述任一不同，就单独列一条。",
+                                   "Entries with a different Bundle ID, name, source or description are listed separately."))
+                           .font(.caption).foregroundColor(.secondary)
                    } else {
-                       Text("Apps with the same Bundle ID will be grouped together regardless of source.").font(.caption).foregroundColor(.secondary)
+                       Text(L10n.t("只看 Bundle ID：同一个 App 只显示一条，其余来源合并。",
+                                   "Bundle ID only: one entry per app, other sources are merged."))
+                           .font(.caption).foregroundColor(.secondary)
                    }
                 }
     }
 
     @ViewBuilder private var updatesSection: some View {
                 Section("Updates") {
-                    Toggle("Check Updates Automatically", isOn: $autoCheckUpdates)
+                    Toggle(L10n.t("自动检查更新", "Check updates automatically"), isOn: $autoCheckUpdates)
+                    Picker(L10n.t("检查频率", "Check frequency"), selection: $updateCheckSeconds) {
+                        Text(L10n.t("每 15 分钟", "Every 15 minutes")).tag(900)
+                        Text(L10n.t("每小时", "Hourly")).tag(3600)
+                        Text(L10n.t("每 6 小时", "Every 6 hours")).tag(21600)
+                        Text(L10n.t("仅手动", "Manual only")).tag(0)
+                    }
+                    .disabled(!autoCheckUpdates)
+                    Toggle(L10n.t("没有 Token 时不自动检查", "Skip automatic checks without a token"),
+                           isOn: $skipAutoCheckWithoutToken)
+                        .disabled(!autoCheckUpdates)
+                    Text(L10n.t("没有 GitHub Token 时，自动检查很容易触发限流（每小时 60 次），导致绑定源失败。",
+                                "Without a GitHub token, automatic checks hit the 60 requests/hour limit and break source binding."))
+                        .font(.caption).foregroundColor(.secondary)
                     Toggle("Include Pre-releases", isOn: $includePrereleases)
                     Toggle("Keep Latest IPA Copy", isOn: $dm.isAutoArchivingIPAs)
                     Text("Pre-release updates are shown with an orange badge. Newly downloaded .ipa files are copied into the IPA_Backups folder inside your Downloads directory, keeping the newest stable and the newest pre-release build.")

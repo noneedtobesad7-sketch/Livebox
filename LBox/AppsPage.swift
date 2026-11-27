@@ -199,26 +199,16 @@ struct InstalledAppsView: View {
                 searchRow
                 content
             }
-            .navigationTitle(Text(L10n.t("我的 app", "My Apps")))
+            .navigationTitle(Text(L10n.t("我的应用", "My Apps")))
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Menu {
-                        Button {
-                            restartIntoLiveContainer()
-                        } label: {
-                            Label(L10n.t("重启到 LiveContainer", "Restart into LiveContainer"),
-                                  systemImage: "arrow.clockwise")
-                        }
-                        Button {
-                            showSwitcher = true
-                        } label: {
-                            Label(L10n.t("切换到其他 App…", "Switch to another app…"),
-                                  systemImage: "arrow.left.arrow.right")
-                        }
+                    Button {
+                        showSwitcher = true
                     } label: {
-                        LiveContainerPill()
+                        Text(L10n.t("切换应用", "Switch app"))
+                            .font(.subheadline.weight(.semibold))
                     }
-                    .accessibilityLabel(Text(L10n.t("切换 LiveContainer / 其他 App", "Switch app")))
+                    .accessibilityLabel(Text(L10n.t("切换应用", "Switch app")))
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if filter == .all {
@@ -230,7 +220,7 @@ struct InstalledAppsView: View {
                                 Text(L10n.t("更新日期", "Release date")).tag("releaseDate")
                             }
                         } label: {
-                            Image(systemName: "arrow.up.arrow.down")
+                            Text(L10n.t("排序", "Sort"))
                         }
                     } else if filter == .unbound {
                         Button((L10n.t("检查来源", "Check Sources"))) {
@@ -501,7 +491,7 @@ struct InstalledAppsView: View {
     private var primaryActionTitle: String {
         switch filter {
         case .unbound:
-            return L10n.t("全绑定", "Bind All")
+            return L10n.t("全部绑定", "Bind All")
         case .all:
             return ""
         case .bound:

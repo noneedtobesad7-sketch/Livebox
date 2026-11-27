@@ -1357,7 +1357,7 @@ class DownloadManager: NSObject, ObservableObject {
         let staged = staging.appendingPathComponent(ipa.lastPathComponent)
         try? fm.removeItem(at: staged)
         guard (try? fm.copyItem(at: ipa, to: staged)) != nil else {
-            Logger.shared.log("HandOff: staging copy failed")
+            Logger.shared.error("HandOff: staging copy failed for \(ipa.lastPathComponent)")
             sendNotification(title: L10n.t("安装失败", "Install failed"),
                              body: L10n.t("无法准备 \(ipa.lastPathComponent)。", "Could not prepare \(ipa.lastPathComponent)."),
                              type: .error)
@@ -1390,9 +1390,17 @@ class DownloadManager: NSObject, ObservableObject {
     /// ipa_downloads; this only restores the "keep the installer" copy that used to happen as a
     /// side effect of auto-extracting.
     func archiveIPABeforeInstall(_ file: URL, app: LocalApp) {
-        // Name the copy after the package being installed, not the old installed version.
+        // Name the copy after the package being installed: binding A to B's source used to save
+        // B's build as "A_version.ipa".
         let version = IPAValidation.shortVersion(in: file) ?? app.version
-        archiveIPA(at: file, appName: app.name, version: version, isPrerelease: false)
+        let packageName = IPAValidation.plistValue(in: file, key: "CFBundleDisplayName")
+            ?? IPAValidation.plistValue(in: file, key: "CFBundleName")
+        let name = (packageName?.isEmpty == false) ? packageName! : app.name
+        let remote = remoteURLString(for: file)
+        let isPre = (remote.map { prereleaseDownloadURLs.contains($0) } ?? false)
+            || VersionText.looksPrerelease(version)
+        archiveIPA(at: file, appName: name, version: version, isPrerelease: isPre)
+        Logger.shared.log("Archive: \(name) \(version) prerelease=\(isPre)")
     }
 
     /// Marks that the install hand-off is in flight, so coming back refreshes the app list.
@@ -1429,7 +1437,7 @@ class DownloadManager: NSObject, ObservableObject {
                     timer.invalidate()
                     self.installWatchTimer = nil
                     self.isHandingOff = false
-                    Logger.shared.log("Install watch: timeout for \(bundleID)")
+                    Logger.shared.warn("Install watch: timeout for \(bundleID)")
                     onSettled?()
                 }
             }
@@ -1893,6 +1901,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 self.refreshInstalledApps()
             } catch {
                 self.downloadStates[sourceURL] = nil
+                Logger.shared.error("Download failed: \(sourceURL.absoluteString) - \(error.localizedDescription)")
                 self.recordDownload(url: sourceURL,
                                     fileName: sourceURL.lastPathComponent,
                                     state: .failed,

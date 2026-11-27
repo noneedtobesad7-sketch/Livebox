@@ -583,6 +583,10 @@ final class GitHubSourceCenter: ObservableObject {
             }
         }
 
+        if let error = lastError {
+            Logger.shared.error("GitHub refresh failed: \(error)")
+        }
+        Logger.shared.log("GitHub refresh: \(linked) bound, \(newUpdates.count) with updates, \(pending.count) candidates")
         pending.sort { $0.appName.localizedCaseInsensitiveCompare($1.appName) == .orderedAscending }
         updates = newUpdates
         candidates = pending
