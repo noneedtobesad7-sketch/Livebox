@@ -1392,7 +1392,7 @@ class DownloadManager: NSObject, ObservableObject {
     func archiveIPABeforeInstall(_ file: URL, app: LocalApp) {
         // Name the copy after the package being installed: binding A to B's source used to save
         // B's build as "A_version.ipa".
-        let version = IPAValidation.shortVersion(in: file) ?? app.version
+        let version = IPAValidation.shortVersion(in: file) ?? app.version ?? "unknown"
         let packageName = IPAValidation.plistValue(in: file, key: "CFBundleDisplayName")
             ?? IPAValidation.plistValue(in: file, key: "CFBundleName")
         let name = (packageName?.isEmpty == false) ? packageName! : app.name
