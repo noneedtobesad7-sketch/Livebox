@@ -20,6 +20,8 @@ struct ContentView: View {
     @AppStorage("kAutoCheckUpdates") private var autoCheckUpdates = true
     // Language: "system" | "zh-Hans" | "en"
     @AppStorage("kAppLanguage") private var appLanguage = "system"
+    @AppStorage("kLoggingEnabled") private var loggingEnabled = true
+    @State private var exportLogURL: URL? = nil
     // Theme: "system" | "light" | "dark"
     @AppStorage("kAppTheme") private var appTheme = "system"
     @State private var lastAutoUpdateCheck: Date = .distantPast
@@ -515,6 +517,8 @@ struct DirectDownloadView: View {
     @State private var newFileName = ""
     @State private var showFileImporter = false
     @State private var installURL: URL?
+    @State private var installBlocked = false
+    @State private var installProblem: String? = nil
     @State private var fileScope: FileScope = .downloads
 
     private func stagedShareCopy(_ file: URL) -> URL {
@@ -590,10 +594,15 @@ struct DirectDownloadView: View {
                             renamingFile = file
                             newFileName = file.lastPathComponent
                         }, onInstall: { url in
-                            Task {
-                                let handedOff = await downloadManager.handOffToLiveContainer(url)
-                                if !handedOff { installURL = stagedShareCopy(url) }
+                            guard LCEnvironment.canInstallInPlace else {
+                                installBlocked = true
+                                return
                             }
+                            if let problem = IPAValidation.problem(with: url) {
+                                installProblem = problem
+                                return
+                            }
+                            Task { _ = await downloadManager.handOffToLiveContainer(url) }
                         })
                     }
                     .onDelete { idx in idx.forEach { downloadManager.deleteFile(activeFiles[$0]) } }
@@ -625,6 +634,22 @@ struct DirectDownloadView: View {
                 }
             }
             .refreshable { downloadManager.refreshFileList() }
+            .alert(Text(L10n.t("需要以多任务模式启动", "Multitask required")), isPresented: $installBlocked) {
+                Button((L10n.t("复制步骤", "Copy steps"))) {
+                    UIPasteboard.general.string = LCEnvironment.guideText
+                }
+                Button((L10n.t("知道了", "OK")), role: .cancel) { }
+            } message: {
+                Text(LCEnvironment.guideText)
+            }
+            .alert(Text(L10n.t("这个 ipa 装不了", "Cannot install this .ipa")), isPresented: Binding(
+                get: { installProblem != nil },
+                set: { if !$0 { installProblem = nil } }
+            )) {
+                Button((L10n.t("知道了", "OK")), role: .cancel) { installProblem = nil }
+            } message: {
+                Text(installProblem ?? "")
+            }
             .sheet(isPresented: Binding(get: { installURL != nil },
                                         set: { if !$0 { installURL = nil } })) {
                 if let url = installURL {
@@ -799,7 +824,7 @@ struct FileRow: View {
             Button(role: .destructive) { manager.deleteFile(localURL) } label: { Label("Delete", systemImage: "trash") }
             if isArchive, let onInstall {
                 Button { onInstall(localURL) } label: {
-                    Label(L10n.t("用 LiveContainer 安装", "Install with LiveContainer"), systemImage: "square.and.arrow.up")
+                    Label(L10n.t("安装（多任务启动）", "Install (Multitask)"), systemImage: "square.and.arrow.up")
                 }
             }
             Button {
@@ -871,7 +896,8 @@ struct SettingsView: View {
                 githubSourcesSection
                 repositoriesSection
                 backupRestoreSection
-                aboutSection
+                logsSection
+        aboutSection
             }
             .navigationTitle("Settings")
             .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: [.folder]) { res in 
@@ -914,6 +940,12 @@ struct SettingsView: View {
                 Button("Cancel", role: .cancel) { } 
             } message: { Text("Some repositories are disabled. Which would you like to copy?") }
             
+            .sheet(isPresented: Binding(get: { exportLogURL != nil },
+                                        set: { if !$0 { exportLogURL = nil } })) {
+                if let url = exportLogURL {
+                    ShareSheet(activityItems: [url])
+                }
+            }
             .sheet(isPresented: $showExporter) { ShareSheet(activityItems: [exportJSONString]) }
             .sheet(isPresented: $showImporter) { ImportJSONView(viewModel: viewModel) }
             .sheet(isPresented: $showBindingImport) { BindingImportSheet(center: github) }
@@ -1119,6 +1151,29 @@ struct SettingsView: View {
                     }
                     Button("Import Repos (JSON)") { showImporter = true }
                 }
+    }
+
+    @ViewBuilder private var logsSection: some View {
+        Section(L10n.t("日志", "Logs")) {
+            Toggle(L10n.t("记录日志", "Enable logging"), isOn: $loggingEnabled)
+            HStack {
+                Text(L10n.t("当前占用", "Size"))
+                Spacer()
+                Text(ByteCountFormatter.string(fromByteCount: Int64(Logger.shared.currentSize), countStyle: .file))
+                    .foregroundColor(.secondary)
+            }
+            NavigationLink(L10n.t("查看最近日志", "Recent log")) {
+                DebugLogView()
+            }
+            Button(L10n.t("导出日志", "Export log")) {
+                exportLogURL = Logger.shared.exportURL()
+            }
+            Button(role: .destructive) {
+                Logger.shared.clear()
+            } label: {
+                Text(L10n.t("清空日志", "Clear log"))
+            }
+        }
     }
 
     @ViewBuilder private var aboutSection: some View {

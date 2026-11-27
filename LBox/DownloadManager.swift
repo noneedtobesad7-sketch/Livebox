@@ -341,7 +341,13 @@ class DownloadManager: NSObject, ObservableObject {
         if let existingFiles = try? fm.contentsOfDirectory(at: ipaArchiveDirectory, includingPropertiesForKeys: nil) {
             for file in existingFiles {
                 let name = file.lastPathComponent
-                guard name.hasPrefix(safeName + "_"), name.lowercased().hasSuffix(".ipa") else { continue }
+                // Strict: `<name>_<version>[_prerelease].ipa`. A plain prefix test would let an app
+                // called "QQ" prune the backup of "QQ音乐".
+                guard name.lowercased().hasSuffix(".ipa"),
+                      let separator = name.range(of: safeName + "_"),
+                      separator.lowerBound == name.startIndex else { continue }
+                let rest = name[separator.upperBound...]
+                guard let first = rest.first, first.isNumber else { continue }
                 let fileIsPrerelease = name.lowercased().hasSuffix("_prerelease.ipa")
                 if fileIsPrerelease == isPrerelease {
                     try? fm.removeItem(at: file)
@@ -1232,6 +1238,14 @@ class DownloadManager: NSObject, ObservableObject {
                         iconURL = findIconFile(in: file, name: "AppIcon60x60") ?? findIconFile(in: file, name: "AppIcon")
                     }
                 }
+                if bundleID == "unknown" || bundleID.isEmpty {
+                    // LiveContainer swaps the .app folder while installing; a temporarily unreadable
+                    // Info.plist is not a new app. Keep the last known values instead of a fake entry.
+                    if let previous = self.installedApps.first(where: { $0.url.lastPathComponent == file.lastPathComponent }) {
+                        newApps.append(previous)
+                    }
+                    continue
+                }
                 newApps.append(LocalApp(name: name, bundleID: bundleID, version: version, url: file, iconURL: iconURL))
             }
             self.installedApps = newApps
@@ -1353,11 +1367,22 @@ class DownloadManager: NSObject, ObservableObject {
         lastHandOffPath = staged.path
 
         var components = URLComponents(string: "livecontainer://install")
-        components?.queryItems = [URLQueryItem(name: "url", value: payload.absoluteString)]
+        // `queryItems` would percent-encode the already encoded file URL a second time (%20 -> %2520).
+        let encoded = payload.absoluteString
+            .replacingOccurrences(of: "&", with: "%26")
+            .replacingOccurrences(of: "#", with: "%23")
+        components?.percentEncodedQuery = "url=" + encoded
         guard let url = components?.url else { return false }
         isWaitingForExternalInstall = true
         Logger.shared.log("HandOff: opening LiveContainer for \(payload.lastPathComponent)")
         UIApplication.shared.open(url, options: [:], completionHandler: nil)
+
+        // LC gives no callback, so watch the installed build until its version changes.
+        let targetBundleID = app?.bundleID ?? IPAValidation.bundleIdentifier(in: ipa)
+        if let targetBundleID {
+            let oldVersion = installedApps.first(where: { $0.bundleID == targetBundleID })?.version
+            watchInstalledVersion(for: targetBundleID, from: oldVersion)
+        }
         return true
     }
 
@@ -1365,10 +1390,65 @@ class DownloadManager: NSObject, ObservableObject {
     /// ipa_downloads; this only restores the "keep the installer" copy that used to happen as a
     /// side effect of auto-extracting.
     func archiveIPABeforeInstall(_ file: URL, app: LocalApp) {
-        archiveIPA(at: file, appName: app.name, version: app.version, isPrerelease: false)
+        // Name the copy after the package being installed, not the old installed version.
+        let version = IPAValidation.shortVersion(in: file) ?? app.version
+        archiveIPA(at: file, appName: app.name, version: version, isPrerelease: false)
     }
 
     /// Marks that the install hand-off is in flight, so coming back refreshes the app list.
+    /// True while a hand-off is in flight, so the UI can refuse a second tap.
+    @Published var isHandingOff = false
+
+    private var installWatchTimer: Timer?
+
+    /// Polls the installed apps until `bundleID` reports a new version. LiveContainer has no
+    /// callback, and multi-task installs do not always change the scene phase, so polling is the
+    /// only reliable signal.
+    func watchInstalledVersion(for bundleID: String,
+                               from oldVersion: String?,
+                               timeout: TimeInterval = 120,
+                               onSettled: (() -> Void)? = nil) {
+        isHandingOff = true
+        installWatchTimer?.invalidate()
+        let deadline = Date().addingTimeInterval(timeout)
+        installWatchTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else { timer.invalidate(); return }
+                self.refreshInstalledApps()
+                let current = self.installedApps.first { $0.bundleID == bundleID }
+                let readable = current?.version?.isEmpty == false
+                let changed = readable && (oldVersion == nil || current?.version != oldVersion)
+                if changed {
+                    timer.invalidate()
+                    self.installWatchTimer = nil
+                    self.isHandingOff = false
+                    Logger.shared.log("Install watch: \(bundleID) -> \(current?.version ?? "?")")
+                    await GitHubSourceCenter.shared.refresh(installedApps: self.installedApps, storeApps: [])
+                    onSettled?()
+                } else if Date() > deadline {
+                    timer.invalidate()
+                    self.installWatchTimer = nil
+                    self.isHandingOff = false
+                    Logger.shared.log("Install watch: timeout for \(bundleID)")
+                    onSettled?()
+                }
+            }
+        }
+    }
+
+    /// LiveContainer consumes the staged copy; anything left over is dead weight.
+    func cleanupHandOffCopies(maxAge: TimeInterval = 600) {
+        guard let dir = lcHandoffDirectory else { return }
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        for item in items {
+            let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
+            if Date().timeIntervalSince(modified) > maxAge {
+                try? fm.removeItem(at: item)
+            }
+        }
+    }
+
     func markWaitingForExternalInstall() {
         isWaitingForExternalInstall = true
     }
@@ -1378,6 +1458,8 @@ class DownloadManager: NSObject, ObservableObject {
     func resumeAfterExternalInstall() {
         guard isWaitingForExternalInstall else { return }
         isWaitingForExternalInstall = false
+        isHandingOff = false
+        cleanupHandOffCopies(maxAge: 0)
         // The .ipa is kept: if the install was cancelled the user can try again from the list.
         refreshInstalledApps()
         if isBatchUpdating { advanceBatchUpdate() }

@@ -115,6 +115,9 @@ struct InstalledAppsView: View {
     @State private var shareURL: URL? = nil
     @State private var showSwitcher = false
     @State private var isScanning = false
+    @State private var showMultitaskGuide = false
+    @State private var batchQueue: [LocalApp] = []
+    @State private var batchStalled: LocalApp? = nil
     @AppStorage("kInstalledSort") private var sortRaw: String = "name"
 
     private let columns = [GridItem(.adaptive(minimum: 80, maximum: 100), spacing: 20, alignment: .top)]
@@ -242,6 +245,29 @@ struct InstalledAppsView: View {
                     }
                 }
             }
+            .alert(Text(L10n.t("需要以多任务模式启动", "Multitask required")), isPresented: $showMultitaskGuide) {
+                Button((L10n.t("复制步骤", "Copy steps"))) {
+                    UIPasteboard.general.string = LCEnvironment.guideText
+                }
+                Button((L10n.t("知道了", "OK")), role: .cancel) { }
+            } message: {
+                Text(LCEnvironment.guideText)
+            }
+            .alert(Text(L10n.t("批量更新暂停", "Batch update paused")), isPresented: Binding(
+                get: { batchStalled != nil },
+                set: { if !$0 { batchStalled = nil } }
+            ), presenting: batchStalled) { app in
+                Button((L10n.t("继续下一个", "Continue"))) {
+                    batchStalled = nil
+                    runNextBatchUpdate()
+                }
+                Button((L10n.t("停止", "Stop")), role: .cancel) {
+                    batchStalled = nil
+                    batchQueue = []
+                }
+            } message: { app in
+                Text(L10n.t("这个应用看起来没有装成（可能取消了）。", "This app does not look installed (maybe cancelled)."))
+            }
             .alert(Text(L10n.t("打开 LiveContainer 完成更新", "Open LiveContainer to finish updating")),
                    isPresented: installAlertBinding) {
                 Button((L10n.t("继续", "Continue"))) {
@@ -357,13 +383,16 @@ struct InstalledAppsView: View {
                 } label: {
                     Text(primaryActionTitle)
                         .font(.footnote.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                 }
                 .background(Color.accentColor.opacity(0.15))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
-                .disabled(isScanning)
-                .frame(width: 96)
+                .disabled(isScanning || (filter == .bound && boundAction == .none))
+                .opacity(filter == .bound && boundAction == .none ? 0.5 : 1)
+                .frame(width: 100)
             }
         }
         .padding(.horizontal)
@@ -394,6 +423,13 @@ struct InstalledAppsView: View {
                         candidate: github.candidate(for: app.bundleID),
                         onDownload: { downloadManager.startDownload(url: $0) },
                         onInstall: { file in
+                            // A single-task guest gets "restart to install" from LC's hook, so ask
+                            // for multitask instead of firing a URL that can never work.
+                            guard LCEnvironment.canInstallInPlace else {
+                                showMultitaskGuide = true
+                                return
+                            }
+                            guard !downloadManager.isHandingOff else { return }
                             if let problem = IPAValidation.problem(with: file) {
                                 NotificationManager.shared.show(
                                     title: L10n.t("这个 ipa 装不了", "This .ipa cannot be installed"),
@@ -436,14 +472,60 @@ struct InstalledAppsView: View {
     // MARK: - Actions
 
     /// Bound -> bulk download, unbound -> bind everything.
+    private enum BoundAction {
+        case none
+        case downloadAll
+        case updateAll
+    }
+
+    /// Apps that still have an update available.
+    private var pendingUpdateApps: [LocalApp] {
+        boundApps.filter { updateURL(for: $0) != nil }
+    }
+
+    /// Of those, the ones without a local .ipa yet.
+    private var missingDownloadApps: [LocalApp] {
+        pendingUpdateApps.filter { app in
+            guard let url = updateURL(for: app) else { return false }
+            return downloadManager.getLocalFile(for: url) == nil
+                && downloadManager.downloadStates[url] == nil
+        }
+    }
+
+    private var boundAction: BoundAction {
+        if pendingUpdateApps.isEmpty { return .none }
+        return missingDownloadApps.isEmpty ? .updateAll : .downloadAll
+    }
+
     private var primaryActionTitle: String {
-        filter == .bound ? L10n.t("全部更新", "Update All") : L10n.t("全部绑定", "Bind All")
+        switch filter {
+        case .unbound:
+            return L10n.t("全绑定", "Bind All")
+        case .all:
+            return ""
+        case .bound:
+            switch boundAction {
+            case .none:
+                return L10n.t("未发现更新", "No Updates")
+            case .downloadAll:
+                return L10n.t("全部下载", "Download All")
+            case .updateAll:
+                return L10n.t("全部更新", "Update All")
+            }
+        }
     }
 
     private func primaryAction() {
         switch filter {
         case .bound:
-            downloadAll()
+            switch boundAction {
+            case .none:
+                break
+            case .downloadAll:
+                downloadAll()
+            case .updateAll:
+                startBatchUpdate()
+            }
         case .unbound:
             // Open the candidate list straight away when we already have one.
             if github.candidates.isEmpty {
@@ -453,6 +535,48 @@ struct InstalledAppsView: View {
             }
         case .all:
             break
+        }
+    }
+
+    /// Serial batch update: LiveContainer's install dialog takes over the screen, so the next app
+    /// may only be handed over once the previous one really finished.
+    private func startBatchUpdate() {
+        guard LCEnvironment.canInstallInPlace else {
+            showMultitaskGuide = true
+            return
+        }
+        let queue = missingDownloadApps.isEmpty ? pendingUpdateApps : missingDownloadApps
+        guard !queue.isEmpty else { return }
+        batchQueue = queue.map { $0 }
+        runNextBatchUpdate()
+    }
+
+    private func runNextBatchUpdate() {
+        guard !batchQueue.isEmpty else { return }
+        let app = batchQueue.removeFirst()
+        let before = app.version
+        guard let url = updateURL(for: app), let file = downloadManager.getLocalFile(for: url) else {
+            runNextBatchUpdate()
+            return
+        }
+        Task {
+            let handedOff = await downloadManager.handOffToLiveContainer(file, app: app)
+            guard handedOff else {
+                batchQueue = []
+                return
+            }
+            downloadManager.watchInstalledVersion(for: app.bundleID, from: before, timeout: 120) {
+                Task { @MainActor in
+                    let installed = downloadManager.installedApps
+                        .first { $0.bundleID == app.bundleID }?.version
+                    if installed == before {
+                        // No callback from LC: ask instead of firing the next URL, which LC drops.
+                        batchStalled = app
+                    } else {
+                        runNextBatchUpdate()
+                    }
+                }
+            }
         }
     }
 

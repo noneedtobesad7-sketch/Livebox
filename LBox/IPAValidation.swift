@@ -9,6 +9,32 @@ import ZIPFoundation
 /// archive has no `Payload/<name>.app/Info.plist`. Catching that here keeps broken downloads
 /// from turning into confusing install failures.
 enum IPAValidation {
+    /// Reads CFBundleShortVersionString out of the payload's Info.plist.
+    static func shortVersion(in url: URL) -> String? {
+        plistValue(in: url, key: "CFBundleShortVersionString")
+    }
+
+    /// Shared reader: `Payload/<name>.app/Info.plist` -> one string value.
+    static func plistValue(in url: URL, key: String) -> String? {
+        #if canImport(ZIPFoundation)
+        guard let archive = Archive(url: url, accessMode: .read) else { return nil }
+        for entry in archive {
+            let path = entry.path
+            guard path.hasPrefix("Payload/"), path.hasSuffix(".app/Info.plist") else { continue }
+            guard path.split(separator: "/").count == 3 else { continue }
+            var data = Data()
+            guard (try? archive.extract(entry, consumer: { data.append($0) })) != nil,
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  let value = plist[key] as? String,
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return value
+        }
+        return nil
+        #else
+        return nil
+        #endif
+    }
+
     /// Reads CFBundleIdentifier out of `Payload/<name>.app/Info.plist` (nil when unreadable).
     static func bundleIdentifier(in url: URL) -> String? {
         #if canImport(ZIPFoundation)

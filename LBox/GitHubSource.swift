@@ -540,7 +540,12 @@ final class GitHubSourceCenter: ObservableObject {
             let pre = usable.filter { $0.prerelease }
                 .max(by: { VersionText.isNewer($1.version, than: $0.version) })
 
-            let current = app.version ?? ""
+            // Unknown version (plist unreadable mid-install) must never produce an "update".
+            guard let installedVersion = app.version, !installedVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                debug[bundleID] = "installed unknown -> skipped"
+                continue
+            }
+            let current = installedVersion
             var chosen: GitHubRelease? = nil
             var chosenKind: GitHubUpdateInfo.Kind = .stable
 
