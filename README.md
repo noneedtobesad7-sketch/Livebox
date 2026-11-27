@@ -1,93 +1,202 @@
 # Livebox
 
-> iOS 应用仓库管理器 / IPA 下载器，配合 [LiveContainer](https://github.com/LiveContainer/LiveContainer) 使用。
-> 本项目基于 [Lolendor/LBox](https://github.com/Lolendor/LBox) 修改增强，**MIT 许可**，与 LBox 官方无隶属关系。
+简体中文 · [English](README.en.md)
 
-<p align="center">
-  <img src="./screenshots/livebox_icon.png" width="120" alt="Livebox">
-</p>
+<img src="./screenshots/livebox_icon.png" width="120" alt="Livebox">
+
+**在 LiveContainer 里管理你侧载 App 的下载、更新和备份。**
+
+Livebox 是 [Lolendor/LBox](https://github.com/Lolendor/LBox)（MIT，已停更）的延续分支，专门为「配合 LiveContainer 使用」这一场景重做：商店源、GitHub 源绑定、更新检查、ipa 下载/归档、更新前快照、安装交接，全部围绕 LC 的安装流程设计。
+
+> 本仓库只提供**未签名 IPA**，需要你自己签名安装（Sideloadly / AltStore / SideStore 等）。
 
 ---
 
-## 这是什么
+## 目录
 
-Livebox 把「找应用 → 下载 IPA → 装进 LiveContainer → 启动」这条链路做成了一个 App：
+- [为什么需要它](#为什么需要它)
+- [功能](#功能)
+- [环境要求](#环境要求)
+- [安装与首次设置](#安装与首次设置)
+- [多任务：安装和更新的前提](#多任务安装和更新的前提)
+- [更新一个 App 会发生什么](#更新一个-app-会发生什么)
+- [目录结构](#目录结构)
+- [截图](#截图)
+- [常见问题](#常见问题)
+- [版本历史](#版本历史)
+- [自行构建](#自行构建)
+- [许可与致谢](#许可与致谢)
 
-- 添加 AltStore 格式的源（JSON），像商店一样浏览；
-- 后台下载 IPA，自动解压并放进 LiveContainer 的 Applications 目录；
-- 已安装的应用可以检查更新、批量更新，并在更新时**保留应用数据**；
-- 直接通过 URL 下载 IPA，也可以导入本地文件。
+---
 
-它本身不提供任何应用，只负责管理**你自己添加的源**。
+## 为什么需要它
 
-## 在 LBox 基础上做了什么
+LiveContainer 能让没越狱的设备跑改过签名的 App，但它只管「运行」，不管「去哪找新版、下下来、留一份旧的、装回去」。
 
-| 能力 | 说明 |
+Livebox 补的就是这一段：
+
+- 从 AltStore / SideStore / 任意 AltStore 兼容源里搜索、下载 ipa
+- 给已装 App 绑定 GitHub Releases 源，自动比对版本、下载新包
+- 下载的 ipa 和备份分开放，更新前还能留一份旧版快照用于回滚
+- 把安装动作交给 LiveContainer 自己的安装流程（只有经过它打补丁，App 才能在 LC 里启动、且数据不丢）
+
+Livebox 自己是跑在 LiveContainer 里的 guest，所以它的界面、安装交接、数据目录都按这个前提设计。
+
+## 功能
+
+**商店**
+
+- 多源管理：内置默认源，可添加任意 AltStore 兼容源；支持启用/停用、拖动排序
+- 搜索、按名称 / 版本 / 更新日期排序
+- 同一 App 多来源时可选「分开显示」或按 Bundle ID 合并
+- 应用详情页显示描述、版本、更新记录
+
+**已绑定 / 未绑定**
+
+- 「检查来源」扫描可识别的 GitHub 源，生成候选让你确认绑定
+- 绑定后自动比对 GitHub Releases 的版本（支持预发行通道）
+- 行内按钮四态：**下载 → 安装 → 最新**，下载中显示进度 / 继续
+- 未绑定：找到候选显示「绑定」，没有则显示「未知」，点它直接进手动绑定表单
+- 批量：**全部下载**（只下缺的）/ **全部更新**（串行，装完一个再发下一个）/ **未发现更新**
+
+**下载与备份**
+
+- 下载目录与备份目录严格分开（`ipa_downloads` / `ipa_backups`）
+- 下载记录：最近 3 条常驻可滚动，失败可一键重试，文件被删会标「文件已删除」
+- 右上角「导入本地ipa」：同名可「保留两个」或「替换」
+- 备份：更新前快照当前版本（可选含数据），长按 App 回滚
+
+**其它**
+
+- 中英双语（跟随系统 / 简体中文 / English），深色模式
+- 日志：设置里可开关、查看、导出 `app.log`（含安装、轮询、归档、GitHub 刷新/限流记录）
+- 覆盖更新不丢数据：安装始终通过 LiveContainer 的安装流程完成
+
+## 环境要求
+
+| 项 | 要求 |
 |---|---|
-| GitHub Releases 更新源 | 给已装应用绑定 `owner/repo`，直接按 Releases 判断更新；自动识别（下载记录 → 你添加的源 → GitHub 搜索）只是**候选**，确认一次后永久绑定，也可以手动粘贴链接绑定 |
-| 正式版 / 预发行版分线 | GitHub API 的 `prerelease` 字段为准，两条线各自比较版本；预发行更新用橙色标记 |
-| 更新不再清数据 | 安装新包的同时把旧的 `LCAppInfo.plist` 合并进新包，首次启动就指向原数据目录（不再需要「跑一次再回 LBox」） |
-| 更新保留备份 | 每次更新静默保留上一版，可长按应用回滚；设置里能看到占用并一键清空 |
-| IPA 备份 | 下载过的 IPA 自动归档到备份目录，正式版 / 预发行版各留最新一份；备份目录可自定义 |
-| 批量更新 | 队列串行执行，自动跳过冲突弹窗，失败自动跳过并继续 |
-| 绑定导入导出 | 绑定存在 App 内部，换 Bundle ID 或重装前可以导出 JSON，装好后再导入 |
-| 官方源内置 | 首次启动自带 AltStore、SideStore 社区源、LiveContainer、StikDebug 四个官方源，列表在 App 内，不依赖外部服务器 |
-| 中英文 + 深色模式 | 默认跟随系统语言与外观，也可以在设置里手动指定 |
+| 系统 | iOS / iPadOS **17.6+**，arm64 |
+| LiveContainer | **3.5.0+**（多任务模式是 3.5.0 引入的） |
+| LC 安装选项 | 必须 **Keep App Extensions**（保留 `LiveProcess` 扩展），否则多任务不可用 |
+| 经典模式 | **不能**开（开了永远不会多任务） |
+| 签名 | 自行签名；本仓库产物**未签名** |
 
-## 2.0 新增
+## 安装与首次设置
 
-- **应用页改版**：标题改为「我的 app」；默认仍是网格（图标 + 名称 + 版本，长按菜单不变），顶部分「已绑定 / 未绑定」，选中后变成 App Store 式的行列表，右侧按状态显示「下载 / 继续 / 安装」或「绑定」。
-- **默认右上角是排序**（名称 / 名称倒序 / 版本 / 更新日期），选中分栏后变成「检查更新」或「检查来源」。
-- **安装交给 LiveContainer**：点「安装」会带包跳转 `livecontainer://install?url=…`，由 LiveContainer 完成打补丁与安装（自己把 `.app` 放进 Applications 会因为缺补丁而 `cannot dlopen a main executable`），装好后切回自动继续队列。
-- **更新前快照**：可选「更新前备份当前版本」和「完整快照（含数据）」，默认关闭；长按应用可回退（只备份程序时数据不回退）。
-- **下载管理**：下载记录（成功 / 失败原因 / 重试 / 删除 / 清空），下载目录占用显示与一键清空。
-- **「我的绑定」源**：已绑定的 App 会生成一份本地源并排在源列表最上面，卸载后仍可从商店装回。
-- **源刷新频率**：1 / 2 / 3 天可选，不再每次启动都全量拉取。
-- 商店排序的日期改为解析 ISO 8601，排序项与源信息中文化（名称 / 日期 / 大小）。
+1. 用 Sideloadly / AltStore / SideStore 给 `Livebox-x.y.z-unsigned.ipa` 签名并安装（建议装进 LiveContainer）。
+2. 打开 Livebox，首次会提示「先完成初始设置」，点「去设置」。
+3. 设置 › 存储与目录：
+   - **LiveContainer 目录**：选 LC 的数据目录（Livebox 需要把 ipa 交给它安装）
+   - **存储根目录**：选一个你找得到的位置（例如「我的 iPhone」下新建的文件夹）
+   - 选好后会自动创建 `<根目录>/ipa_downloads` 和 `<根目录>/ipa_backups`
+4. 设置 › 仓库：确认内置源，按需添加或启用。
+5. 到「商店」搜索，或去「应用 › 未绑定 › 检查来源」绑定 GitHub 源。
 
-## 安装
+## 多任务：安装和更新的前提
 
-未签名的 IPA 需要自己签名，需要：
+这一条很关键，也是 Livebox 与普通侧载管理器最大的不同。
 
-1. Windows / macOS 上的 **Sideloadly**（或 AltStore、SideStore）与 iTunes 驱动；
-2. 一个普通 Apple ID（免费账号证书 7 天，需重签）或开发者账号；
-3. 目标设备上已安装 **[LiveContainer](https://github.com/LiveContainer/LiveContainer)**。
+**单任务**时 LiveContainer 的进程本身变成了 guest（也就是 Livebox），宿主 UI 不在，`livecontainer://install` 会被 LC 的 guest hook 直接拦下——表现就是「点了没反应」或弹「重启后安装」。
 
-步骤：
+**多任务**时 guest 跑在 `LiveProcess` 扩展进程里，宿主仍然活着，安装请求才会被 LC 收到并弹出安装框。
 
-1. 从 [Releases](https://github.com/noneedtobesad7-sketch/Livebox/releases) 下载 `Livebox-1.0-unsigned.ipa`；
-2. 用 Sideloadly 签名并安装到设备；
-3. 打开 Livebox → 选择 LiveContainer 的存储目录（「On My iPhone」→ LiveContainer），否则无法自动安装和启动；
-4. 需要的话在「设置 → 目录」里改下载目录 / IPA 备份目录。
+设置一次即可（二选一）：
 
-> 首次打开如果文件选择器不可用：打开 LiveContainer → 在 My Apps 里长按 Livebox → Settings → 打开 **Fix File Picker**，再回来选目录。
+- 在 LiveContainer 里进 **Livebox 的应用设置** → 多任务 → **是**（只影响 Livebox）
+- 或 LC **设置 › Multitask** → 打开 **Auto Launch in Multitask Mode**（全局，所有 App 都多任务）
 
-## 从 LBox 迁移
+Livebox 会在安装前自检，若不是多任务会弹出引导（附「复制步骤」），不会白点一次。设置页也能看到当前状态：多任务启动状态 · 已启用 / 未启用。
 
-- **源列表**：旧 LBox 里 `设置 → Export Repos → Copy as JSON`，装好 Livebox 后 `设置 → 导入源（JSON）` 粘贴回去；
-- **GitHub 绑定**：旧版 LBox 没有导出功能，需要在 Livebox 里重新确认一轮（Apps 页橙色提示条，或长按应用手动绑定）。以后换版可以直接用「导出绑定 / 导入绑定」。
+## 更新一个 App 会发生什么
 
-## 自己编译
+```
+点「下载」            → ipa 落到 ipa_downloads，按钮变「安装」
+点「安装」            → 校验 ipa → 归档一份到 ipa_backups
+                      → 复制副本到 LC 的交接目录
+                      → 打开 livecontainer://install?url=…
+LC 弹「覆盖更新 / 安装为新 App」→ 选「覆盖更新」保留数据
+LC 打补丁并安装        → 回到 Livebox
+回到前台 / 轮询发现版本变化 → 重读已装列表 → 按钮变「最新」
+```
 
-没有 Mac 也能编：仓库自带 GitHub Actions 工作流，用 GitHub 免费提供的 macOS 机器编出**未签名 IPA**。
+要点：
 
-1. Fork 本仓库（或直接用 Actions）；
-2. `Actions` → **Unsigned Build (Artifact)** → `Run workflow`；
-3. 跑完在 Artifacts 里下载 `LBox-IPA`，解压得到 `LBox.ipa`（文件名沿用工程内部 target 名）。
+- **原件永远不删**：`ipa_downloads` 里那份一直在；LC 删掉的是交接目录里的副本
+- **副本会自动清理**：回前台删一次，启动再清 10 分钟以上的残留
+- 「覆盖更新 / 安装为新 App」这个弹窗在 LC 进程里，**必须你点一次**，Livebox 代替不了
+- 批量更新是串行的：上一个装完（检测到版本变化）才会发下一个；120 秒没动静会暂停并询问「继续下一个 / 停止」，不硬发（会被 LC 丢弃）
 
-本地开发需要 macOS + Xcode 26 或更新版本（工程使用 `objectVersion = 77` 与 `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`），最低支持 iOS 17.6。
+## 目录结构
 
-## 已知限制
+```
+<你选的存储根目录>
+├── ipa_downloads/     下载的、导入的 ipa（安装源）
+└── ipa_backups/       安装前的归档副本 + 更新前快照
+```
 
-- **未签名 IPA**：必须自行签名才能安装，免费开发者证书 7 天过期；
-- **数据迁移依赖 LiveContainer**：更新保数据是靠在安装时合并 `LCAppInfo.plist` 实现的，LiveContainer 大改存储结构后会失效；
-- **GitHub API 限额**：未填 token 时每小时 60 次，建议在设置里填一个 Personal Access Token（只读 public repo 即可）；
-- 应用内的搜索匹配只是**候选**，不会自动改成你的更新源；
-- 这个 App 不能上架 App Store，只适合自用或小范围分发。
+- 两个目录都可以长按安装（下载页右上角「导入本地ipa」也把文件放这里）
+- 备份快照是 `<uuid>/` 文件夹，不是 ipa；`应用名_版本.ipa` 才是归档副本
+
+## 截图
+
+| 商店 | 应用 |
+|---|---|
+| ![商店](./screenshots/store.png) | ![应用](./screenshots/apps.png) |
+
+| 下载管理 | 应用详情 |
+|---|---|
+| ![下载](./screenshots/downloads.png) | ![详情](./screenshots/app_details.png) |
+
+## 常见问题
+
+**点安装没有任何反应？**
+没开多任务。按上面「多任务」那一节设置一次，重启 Livebox 后再试。
+
+**装完了版本号没变、按钮还是「安装」？**
+现在会每 2 秒轮询已装版本、最长 120 秒；如果 LC 那边你还没点「覆盖更新」，它不会变。点完再等一两秒。
+
+**提示「ipa 里没有 Payload/xxx.app/Info.plist，LiveContainer 装不了」**
+这个包结构不符合 LC 的预期（AltStore 能装、LC 装不了），换一个来源或让作者重新打包。
+
+**GitHub 检查更新失败 / 绑定源失败？**
+多半是限流：没填 Token 时是 60 次/小时。到 设置 › 更新 把「没有 Token 时不自动检查」打开，或填一个 GitHub Token；也可以把检查频率调成每小时/每 6 小时。
+
+**下载的 ipa 不见了？**
+2.0.7 之前有个「下载完成自动解压」的旧逻辑会归档后删源文件，已经移除。现在下载只落盘、不删、不自动装。
+
+**想定位问题？**
+设置 › 日志 › 导出日志，把 `app.log` 发出来；里面有安装、轮询、归档、GitHub 刷新的记录（Token 和主目录会自动打码）。
+
+## 版本历史
+
+| 版本 | 重点 |
+|---|---|
+| 1.0 – 2.0 | 品牌化、双语、深色模式、数据保留升级、GitHub 源绑定 |
+| 2.0.1 – 2.0.4 | 安装方式反复调整，2.0.3 有严重问题已废弃 |
+| 2.0.5 | 产物统一为 `Livebox.app` / `Livebox.ipa`，商店顶部重叠修复 |
+| 2.0.6 – 2.0.8 | 修「下载的 ipa 被删」，安装入口回到 `livecontainer://install` |
+| 2.0.9 | 多任务检测 + 闸门、安装轮询、三态批量、日志、新图标 |
+| 2.0.10 | 设置「多任务启动状态」、刷新时机、删除标记、导入本地 ipa |
+| **2.0.11** | UI 文案与单次切换按钮、检查频率、预发行归档分通道、包内名字归档、错误日志 |
+
+完整发行说明见 [Releases](https://github.com/noneedtobesad7-sketch/Livebox/releases)。
+
+## 自行构建
+
+无需 Mac，用 GitHub Actions 出未签名包：
+
+```
+改代码 → push → Actions「Unsigned Build (Artifact)」→ 下载 Livebox-IPA.zip → 解压得 Livebox.ipa
+```
+
+- 工程 `objectVersion = 77`，需要 **Xcode 26+**（CI 若不是，把 workflow 的 `runs-on` 改成 `macos-26`）
+- 依赖仅 SPM：ZIPFoundation 0.9.20
+- Bundle ID：`NNSAD.Livebox`
 
 ## 许可与致谢
 
-- 本项目基于 [Lolendor/LBox](https://github.com/Lolendor/LBox)，遵循 **MIT License**，原始版权归原作者所有，详见 [LICENSE](./LICENSE)；
-- 图标与界面改动为本项目所有；
-- 与 LiveContainer、AltStore、SideStore、StikDebug 均无隶属关系，相关名称与商标归各自所有者；
-- 本项目**不托管、不分发**任何第三方应用，所有内容来自你自己添加的源。
+- 基于 [Lolendor/LBox](https://github.com/Lolendor/LBox)，MIT License
+- 运行宿主：[LiveContainer](https://github.com/LiveContainer/LiveContainer)
+- 解压：[ZIPFoundation](https://github.com/weichsel/ZIPFoundation)
+- 图标：作者自绘
