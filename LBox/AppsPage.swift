@@ -313,6 +313,7 @@ struct InstalledAppsView: View {
                     await releaseDates.refreshIfNeeded(downloadManager.installedApps)
                 }
             }
+            .onAppear { downloadManager.refreshInstalledApps() }
             .onChange(of: sortRaw) { value in
                 guard value == "releaseDate" else { return }
                 Task { await releaseDates.refreshIfNeeded(downloadManager.installedApps) }

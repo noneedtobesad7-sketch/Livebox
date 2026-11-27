@@ -40,6 +40,11 @@ struct ContentView: View {
         .onChange(of: downloadManager.installedApps) { newApps in viewModel.checkForUpdates(installedApps: newApps) }
         .onChange(of: showSetupPicker) { isPresented in checkForPickerFailure(isPresented: isPresented) }
         .onChange(of: scenePhase) { phase in handleScenePhase(phase) }
+        // Multi-task installs do not always change the scene phase: LC's dialog sits on top while
+        // Livebox stays active, so didBecomeActive is the second trigger.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            if downloadManager.isWaitingForExternalInstall { downloadManager.resumeAfterExternalInstall() }
+        }
             
             // Watch pendingInstallation to trigger local alert state
             .onChange(of: downloadManager.pendingInstallation?.id) { newID in
@@ -514,6 +519,8 @@ struct DirectDownloadView: View {
     @State private var renamingFile: URL?
     @State private var newFileName = ""
     @State private var showFileImporter = false
+    @State private var pendingImport: PendingImport? = nil
+    @State private var importNotice: String? = nil
     @State private var installURL: URL?
     @State private var installBlocked = false
     @State private var installProblem: String? = nil
@@ -531,6 +538,53 @@ struct DirectDownloadView: View {
         } catch {
             return file
         }
+    }
+
+    private struct PendingImport: Identifiable {
+        let id = UUID()
+        let source: URL
+        let name: String
+    }
+
+    private enum ImportMode { case keepBoth, replace }
+
+    private func performImport(from source: URL, name: String, mode: ImportMode) {
+        let folder = downloadManager.currentDownloadFolder
+        let fm = FileManager.default
+        let accessing = source.startAccessingSecurityScopedResource()
+        defer { if accessing { source.stopAccessingSecurityScopedResource() } }
+
+        do {
+            let dest: URL
+            switch mode {
+            case .replace:
+                dest = folder.appendingPathComponent(name)
+                if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+            case .keepBoth:
+                dest = uniqueName(in: folder, name: name)
+            }
+            try fm.copyItem(at: source, to: dest)
+            downloadManager.refreshFileList()
+            importNotice = L10n.t("已导入，长按可安装", "Imported - long-press to install")
+        } catch {
+            importNotice = L10n.t("导入失败：\(error.localizedDescription)",
+                                  "Import failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// `App.ipa` -> `App (1).ipa` -> `App (2).ipa` ...
+    private func uniqueName(in folder: URL, name: String) -> URL {
+        let ns = name as NSString
+        let base = ns.deletingPathExtension
+        let ext = ns.pathExtension
+        var candidate = folder.appendingPathComponent(name)
+        var index = 1
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let next = ext.isEmpty ? "\(base) (\(index))" : "\(base) (\(index)).\(ext)"
+            candidate = folder.appendingPathComponent(next)
+            index += 1
+        }
+        return candidate
     }
 
     private var activeFiles: [URL] {
@@ -600,7 +654,10 @@ struct DirectDownloadView: View {
                                 installProblem = problem
                                 return
                             }
-                            Task { _ = await downloadManager.handOffToLiveContainer(url) }
+                            Task {
+                                let handedOff = await downloadManager.handOffToLiveContainer(url)
+                                if handedOff { downloadManager.watchNewInstalls() }
+                            }
                         })
                     }
                     .onDelete { idx in idx.forEach { downloadManager.deleteFile(activeFiles[$0]) } }
@@ -621,17 +678,52 @@ struct DirectDownloadView: View {
             .navigationTitle(Text(L10n.t("下载管理", "Download Manager")))
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showFileImporter = true }) {
-                        Image(systemName: "square.and.arrow.down")
+                    Button((L10n.t("导入本地ipa", "Import local IPA"))) {
+                        showFileImporter = true
                     }
                 }
             }
-            .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.data, .archive]) { res in
-                if case .success(let url) = res {
-                    downloadManager.importFile(at: url)
+            .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.data, .archive]) { result in
+                guard case .success(let url) = result else { return }
+                let name = url.lastPathComponent
+                let dest = downloadManager.currentDownloadFolder.appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: dest.path) {
+                    pendingImport = PendingImport(source: url, name: name)
+                } else {
+                    performImport(from: url, name: name, mode: .keepBoth)
                 }
             }
-            .refreshable { downloadManager.refreshFileList() }
+            .alert(L10n.t("文件已存在", "File already exists"), isPresented: Binding(
+                get: { pendingImport != nil },
+                set: { if !$0 { pendingImport = nil } }
+            ), presenting: pendingImport) { item in
+                Button((L10n.t("保留两个", "Keep both"))) {
+                    performImport(from: item.source, name: item.name, mode: .keepBoth)
+                    pendingImport = nil
+                }
+                Button((L10n.t("替换", "Replace")), role: .destructive) {
+                    performImport(from: item.source, name: item.name, mode: .replace)
+                    pendingImport = nil
+                }
+                Button((L10n.t("取消", "Cancel")), role: .cancel) { pendingImport = nil }
+            } message: { item in
+                Text(L10n.t("「\(item.name)」已经存在，保留两个会另存一份。",
+                            "\(item.name) already exists. Keeping both saves a copy under a new name."))
+            }
+            .alert(importNotice ?? "", isPresented: Binding(
+                get: { importNotice != nil },
+                set: { if !$0 { importNotice = nil } }
+            )) {
+                Button((L10n.t("知道了", "OK")), role: .cancel) { importNotice = nil }
+            }
+            .refreshable {
+                downloadManager.cleanupBrokenFiles()
+                downloadManager.refreshFileList()
+            }
+            .onAppear {
+                downloadManager.cleanupBrokenFiles()
+                downloadManager.refreshFileList()
+            }
             .alert(Text(L10n.t("需要以多任务模式启动", "Multitask required")), isPresented: $installBlocked) {
                 Button((L10n.t("复制步骤", "Copy steps"))) {
                     UIPasteboard.general.string = LCEnvironment.guideText
@@ -748,6 +840,10 @@ struct DownloadHistoryRow: View {
                     .truncationMode(.middle)
                 HStack(spacing: 4) {
                     Text(record.date, style: .time)
+                    if fileWasDeleted {
+                        Text(L10n.t("文件已删除", "File deleted"))
+                            .foregroundColor(.orange)
+                    }
                     if record.bytes > 0 {
                         Text("•")
                         Text(ByteCountFormatter.string(fromByteCount: record.bytes, countStyle: .file))
@@ -770,6 +866,13 @@ struct DownloadHistoryRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// The record survives the file; showing "downloaded" for something that is gone is misleading.
+    private var fileWasDeleted: Bool {
+        guard record.state == .finished else { return false }
+        let path = downloadManager.currentDownloadFolder.appendingPathComponent(record.fileName).path
+        return !FileManager.default.fileExists(atPath: path)
     }
 
     private var iconName: String {
@@ -1002,9 +1105,18 @@ struct SettingsView: View {
                         Text("\(ByteCountFormatter.string(fromByteCount: dm.downloadsSizeBytes, countStyle: .file)) + \(ByteCountFormatter.string(fromByteCount: dm.backupsSizeBytes, countStyle: .file))")
                             .foregroundColor(.secondary)
                     }
-                    Toggle(L10n.t("用 LiveContainer 安装", "Install via LiveContainer"), isOn: $dm.installViaLiveContainer)
-                    Text(L10n.t("推荐开启：把 ipa 交给 LiveContainer 打补丁并安装，App 才能启动、数据也能保留。",
-                                "Recommended. Hand the .ipa to LiveContainer so it can patch the app and keep its data."))
+                    HStack {
+                        Text(L10n.t("多任务启动状态", "Multitask status"))
+                        Spacer()
+                        Text(LCEnvironment.canInstallInPlace
+                             ? L10n.t("已启用", "Enabled")
+                             : L10n.t("未启用", "Disabled"))
+                            .foregroundColor(LCEnvironment.canInstallInPlace ? .green : .secondary)
+                    }
+                    Text(LCEnvironment.canInstallInPlace
+                         ? L10n.t("当前以多任务运行，可以直接安装和更新。", "Running in multitask: installs and updates work directly.")
+                         : L10n.t("在 LiveContainer 里长按 Livebox 选「多任务」；或打开 设置 › Multitask › Auto Launch in Multitask Mode。",
+                                  "Long-press Livebox in LiveContainer and choose Multitask, or enable Auto Launch in Multitask Mode."))
                         .font(.caption).foregroundColor(.secondary)
                 }
     }

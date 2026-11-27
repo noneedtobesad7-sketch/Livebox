@@ -1436,6 +1436,39 @@ class DownloadManager: NSObject, ObservableObject {
         }
     }
 
+    /// Short polling for installs triggered from the download page: refresh until the set of
+    /// installed bundle IDs changes, at most 30 s.
+    func watchNewInstalls(timeout: TimeInterval = 30) {
+        let before = Set(installedApps.map(\.bundleID))
+        let deadline = Date().addingTimeInterval(timeout)
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else { timer.invalidate(); return }
+                self.refreshInstalledApps()
+                let now = Set(self.installedApps.map(\.bundleID))
+                if now != before || Date() > deadline {
+                    timer.invalidate()
+                    await GitHubSourceCenter.shared.refresh(installedApps: self.installedApps, storeApps: [])
+                }
+            }
+        }
+    }
+
+    /// 0-byte leftovers from an interrupted download are invisible in every list but break installs.
+    func cleanupBrokenFiles() {
+        let fm = FileManager.default
+        for folder in [currentDownloadFolder, backupDirectory] {
+            guard let items = try? fm.contentsOfDirectory(at: folder,
+                                                         includingPropertiesForKeys: [.fileSizeKey]) else { continue }
+            for item in items {
+                let size = ((try? item.resourceValues(forKeys: [.fileSizeKey]))? .fileSize) ?? 0
+                if size == 0 {
+                    try? fm.removeItem(at: item)
+                }
+            }
+        }
+    }
+
     /// LiveContainer consumes the staged copy; anything left over is dead weight.
     func cleanupHandOffCopies(maxAge: TimeInterval = 600) {
         guard let dir = lcHandoffDirectory else { return }
@@ -1860,6 +1893,11 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 self.refreshInstalledApps()
             } catch {
                 self.downloadStates[sourceURL] = nil
+                self.recordDownload(url: sourceURL,
+                                    fileName: sourceURL.lastPathComponent,
+                                    state: .failed,
+                                    bytes: 0,
+                                    message: error.localizedDescription)
                 self.refreshFileList()
                 if let fname = sourceURL.lastPathComponent as String?, let furl = self.currentDownloadFolder.appendingPathComponent(fname) as URL? {
                     self.extractingFiles.remove(furl)
