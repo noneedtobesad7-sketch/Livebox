@@ -20,8 +20,6 @@ struct ContentView: View {
     @AppStorage("kAutoCheckUpdates") private var autoCheckUpdates = true
     // Language: "system" | "zh-Hans" | "en"
     @AppStorage("kAppLanguage") private var appLanguage = "system"
-    @AppStorage("kLoggingEnabled") private var loggingEnabled = true
-    @State private var exportLogURL: URL? = nil
     // Theme: "system" | "light" | "dark"
     @AppStorage("kAppTheme") private var appTheme = "system"
     @State private var lastAutoUpdateCheck: Date = .distantPast
@@ -850,6 +848,7 @@ struct FileRow: View {
 
 struct SettingsView: View {
     @AppStorage("kSourceRefreshDays") private var sourceRefreshDays: Int = 1
+    @AppStorage("kLoggingEnabled") private var loggingEnabled = true
     @AppStorage("kBackupAppBeforeUpdate") private var backupAppBeforeUpdate = false
     @AppStorage("kBackupFullSnapshot") private var backupFullSnapshot = false
     @ObservedObject var viewModel: AppStoreViewModel
@@ -940,12 +939,6 @@ struct SettingsView: View {
                 Button("Cancel", role: .cancel) { } 
             } message: { Text("Some repositories are disabled. Which would you like to copy?") }
             
-            .sheet(isPresented: Binding(get: { exportLogURL != nil },
-                                        set: { if !$0 { exportLogURL = nil } })) {
-                if let url = exportLogURL {
-                    ShareSheet(activityItems: [url])
-                }
-            }
             .sheet(isPresented: $showExporter) { ShareSheet(activityItems: [exportJSONString]) }
             .sheet(isPresented: $showImporter) { ImportJSONView(viewModel: viewModel) }
             .sheet(isPresented: $showBindingImport) { BindingImportSheet(center: github) }
@@ -1165,8 +1158,8 @@ struct SettingsView: View {
             NavigationLink(L10n.t("查看最近日志", "Recent log")) {
                 DebugLogView()
             }
-            Button(L10n.t("导出日志", "Export log")) {
-                exportLogURL = Logger.shared.exportURL()
+            ShareLink(item: Logger.shared.exportURL()) {
+                Text(L10n.t("导出日志", "Export log"))
             }
             Button(role: .destructive) {
                 Logger.shared.clear()

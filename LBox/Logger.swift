@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 /// Lightweight file logger. Compiled in for Release too, and switched on/off from
 /// Settings -> Logs (`kLoggingEnabled`).
